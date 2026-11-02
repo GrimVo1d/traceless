@@ -541,7 +541,7 @@ func TestInspectLimitsFields(t *testing.T) {
 	for range 5000 {
 		many = append(many, encodeChunk("abCd", nil)...)
 	}
-	for i := range 2 * maxFields {
+	for i := range 2 * format.MaxFields {
 		key := fmt.Sprintf("key%d\x00value", i)
 		many = append(many, encodeChunk("tEXt", []byte(key))...)
 	}
@@ -549,14 +549,14 @@ func TestInspectLimitsFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fields) != maxFields+1 {
-		t.Errorf("got %d fields, want %d", len(fields), maxFields+1)
+	if len(fields) != format.MaxFields+1 {
+		t.Errorf("got %d fields, want %d", len(fields), format.MaxFields+1)
 	}
 	got := fieldMap(fields)
 	if got["abCd chunk"] != "5000 chunks, 0 bytes" {
 		t.Errorf("abCd chunk = %q, want grouped count", got["abCd chunk"])
 	}
-	if got["More metadata"] != fmt.Sprintf("%d further items not shown", maxFields+1) {
+	if got["More metadata"] != fmt.Sprintf("%d further items not shown", format.MaxFields+1) {
 		t.Errorf("More metadata = %q", got["More metadata"])
 	}
 }

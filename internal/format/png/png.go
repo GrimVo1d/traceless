@@ -33,11 +33,11 @@ func (Handler) Match(header []byte) bool {
 
 // Inspect implements format.Handler.
 func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
-	p := &processor{mode: modeInspect}
+	p := &processor{mode: modeInspect, report: format.Report{Unit: "chunks"}}
 	if err := p.run(r); err != nil {
 		return nil, err
 	}
-	return p.report.result(), nil
+	return p.report.Result(), nil
 }
 
 // Strip implements format.Handler.
@@ -68,7 +68,7 @@ type processor struct {
 	w       io.Writer // output, modeStrip only
 	cr      *chunkReader
 	layout  layout
-	report  report
+	report  format.Report
 	pending []pendingChunk // color space chunks not yet written
 	sawEXIF bool           // an eXIf chunk was decoded
 }
@@ -291,7 +291,7 @@ func (p *processor) drop(h chunkHeader) error {
 				return err
 			}
 			for _, f := range fields {
-				p.report.add(f, false, 0)
+				p.report.Add(f, false, 0)
 			}
 			return nil
 		}
@@ -299,7 +299,7 @@ func (p *processor) drop(h chunkHeader) error {
 		if err != nil {
 			return err
 		}
-		p.report.add(f, grouped, h.Length)
+		p.report.Add(f, grouped, int64(h.Length))
 	}
 	return nil
 }
@@ -310,7 +310,7 @@ func (p *processor) found(name, value string) error {
 	case modeVerify:
 		return fmt.Errorf("png: %w: %s: %s", format.ErrMetadataRemains, name, value)
 	case modeInspect:
-		p.report.add(format.Field{Name: name, Value: value}, false, 0)
+		p.report.Add(format.Field{Name: name, Value: value}, false, 0)
 	}
 	return nil
 }
@@ -341,56 +341,4 @@ func (p *processor) readSmall(h chunkHeader, limit uint32) ([]byte, error) {
 		return nil, malformed("%s chunk too long (%d bytes)", h.Type, h.Length)
 	}
 	return p.cr.ReadAll(h)
-}
-
-const (
-	// maxFields caps how many fields Inspect returns, so a file with millions
-	// of chunks can't make it use unbounded memory.
-	maxFields = 256
-)
-
-// report collects Inspect fields. Repeated generic chunks are grouped into
-// one field, and fields past maxFields are only counted.
-type report struct {
-	fields  []format.Field
-	groups  map[string]*group
-	omitted int
-}
-
-type group struct {
-	index int
-	count int
-	bytes int64
-}
-
-func (r *report) add(f format.Field, grouped bool, size uint32) {
-	if grouped {
-		if g, ok := r.groups[f.Name]; ok {
-			g.count++
-			g.bytes += int64(size)
-			r.fields[g.index].Value = fmt.Sprintf("%d chunks, %d bytes", g.count, g.bytes)
-			return
-		}
-	}
-	if len(r.fields) >= maxFields {
-		r.omitted++
-		return
-	}
-	if grouped {
-		if r.groups == nil {
-			r.groups = make(map[string]*group)
-		}
-		r.groups[f.Name] = &group{index: len(r.fields), count: 1, bytes: int64(size)}
-	}
-	r.fields = append(r.fields, f)
-}
-
-func (r *report) result() []format.Field {
-	if r.omitted > 0 {
-		return append(r.fields, format.Field{
-			Name:  "More metadata",
-			Value: fmt.Sprintf("%d further items not shown", r.omitted),
-		})
-	}
-	return r.fields
 }
