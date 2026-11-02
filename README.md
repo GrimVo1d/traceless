@@ -1,0 +1,131 @@
+<div align="center">
+
+# traceless
+
+**See what your files reveal about you, then make them forget it.**
+
+A fast metadata remover that rebuilds files from scratch,
+so even data hidden where other tools don't look is gone.
+
+</div>
+
+---
+
+A photo can carry your home's GPS coordinates. A screenshot can name your
+phone. A PNG can carry anything after its last byte, and most viewers will
+never show it. traceless finds all of it and removes it.
+
+```console
+$ traceless inspect photo.png
+photo.png (PNG):
+  ICC profile: Pixel 7 Pro camera (49 bytes)
+  tEXt Author: Jane Doe
+  zTXt Comment: taken at home
+  iTXt XML:com.adobe.xmp [en]: <x:xmpmeta>GPS 52.5200,13.4050</x:xmpmeta>
+  EXIF: 10 bytes
+  Modified: 2024-05-01 12:30:00 UTC
+  prVt chunk: 16 bytes
+  Trailing data: 14 bytes after IEND
+
+$ traceless strip photo.png
+photo.png -> photo.clean.png (PNG)
+
+$ traceless verify photo.clean.png
+photo.clean.png (PNG): clean
+```
+
+## What other tools miss
+
+Metadata tools look for the fields they know. Data hidden anywhere else is
+never shown, and often survives cleaning. Tested on PNG files with planted
+secrets (exiftool 12.57):
+
+| Hidden data | `exiftool` shows it | `exiftool -all=` removes it | traceless |
+|:--|:--:|:--:|:--:|
+| Author, comments, XMP, EXIF, timestamps, ICC profile | ✅ | ✅ | ✅ |
+| Private, unknown chunks | ❌ | ❌ | ✅ |
+| Data after the compressed image stream | ❌ | ❌ | ✅ |
+| Extra image chunks, orphaned APNG frames | ❌ | ❌ | ✅ |
+| Data after the end of the file | ⚠️ warning | ✅ | ✅ |
+| Data appended to color chunks (gAMA, pHYs) | ❌ | ✅ | ✅ |
+
+mat2 removes all of this too, but by re-rendering the image: 16-bit images
+come out as 8-bit, and palette images as full RGBA. traceless keeps the
+pixels, bit depth and color type exactly as they were.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[input file] --> B{format?}
+    B -- unknown --> R[refuse]
+    B -- PNG --> C[check every chunk:<br/>CRC, size, order, values]
+    C --> D[keep only what<br/>viewers use]
+    C --> E[decompress pixels,<br/>check, re-encode]
+    D --> T[temp file]
+    E --> T
+    T --> V{verify}
+    V -- clean --> O[output]
+    V -- not clean --> R
+```
+
+- **Rebuild, don't filter.** Only the parts needed to display the image
+  survive, and only with the exact size and position a viewer expects and
+  values in their valid range.
+- **Re-encoded pixels.** Data appended to the image stream, hidden in padding
+  bits or in out-of-range palette indexes is removed, along with the original
+  encoder's fingerprint.
+- **Fail closed.** Unknown formats, broken files and unsupported features are
+  errors, never "clean".
+- **Verified output.** Every result is checked again before it is written,
+  and a failed or cancelled run leaves no partial files.
+- **Hostile input.** Every length and offset is bounds-checked, memory and
+  decompression are capped, and the parsers are fuzzed.
+
+## Getting started
+
+Build it from the repository root with Go 1.27 or newer:
+
+```sh
+go build -o traceless ./cmd/traceless
+```
+
+| Command | Does |
+|:--|:--|
+| `traceless inspect FILE...` | list the metadata in each file |
+| `traceless strip FILE...` | write `NAME.clean.EXT` next to each file |
+| `traceless strip -o OUT FILE` | choose the output path |
+| `traceless strip -inplace FILE...` | replace the originals |
+| `traceless verify FILE...` | check that files are clean |
+
+traceless never overwrites an existing file unless you pass `-inplace`.
+
+## Formats
+
+| Format | Status |
+|:--|:--|
+| PNG | ✅ supported |
+| JPEG | 🚧 next |
+| Office documents, PDF, MP4 / HEIC, audio | 🗺️ planned |
+
+## Limitations
+
+- Animated PNG (APNG) is refused for now.
+- ICC color profiles are removed, so wide-gamut images (e.g. Display P3
+  screenshots) can look slightly different.
+- EXIF is reported by size only; its tags (such as GPS) aren't decoded yet.
+  Stripping removes it either way.
+- Color values viewers need (gamma, primaries; about 70 bytes) are
+  range-checked but kept as they are, and so are unused palette entries.
+- Data hidden in the pixel values themselves (steganography) is out of scope.
+- `-inplace` writes a new file. The old data may stay on disk until the space
+  is reused.
+
+## Development
+
+```sh
+go test ./...
+go test ./internal/format/png -run '^$' -fuzz FuzzHandler -fuzztime 60s
+```
+
+Pure Go standard library, no dependencies.
