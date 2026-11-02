@@ -92,3 +92,45 @@ func TestFixIndexes(t *testing.T) {
 		t.Errorf("8-bit: fixed %d, row %v", n, row8)
 	}
 }
+
+// TestFixIndexesRandom compares fixIndexes with a simple bit-by-bit reference
+// on random rows of every palette depth.
+func TestFixIndexesRandom(t *testing.T) {
+	index := func(row []byte, i, depth int) int {
+		bit := i * depth
+		return int(row[bit/8]>>(8-depth-bit%8)) & (1<<depth - 1)
+	}
+	rng := rand.New(rand.NewPCG(3, 4))
+	for range 100_000 {
+		depth := []int{1, 2, 4, 8}[rng.IntN(4)]
+		width := 1 + rng.IntN(37)
+		paletteLen := 1 + rng.IntN(1<<depth)
+		row := make([]byte, (width*depth+7)/8)
+		for j := range row {
+			row[j] = byte(rng.Uint32())
+		}
+		orig := bytes.Clone(row)
+
+		var want int64
+		for i := range width {
+			if index(orig, i, depth) > paletteLen {
+				want++
+			}
+		}
+		if got := fixIndexes(row, uint32(width), uint8(depth), paletteLen, true); got != want {
+			t.Fatalf("depth %d, %d entries: fixed %d indexes, want %d", depth, paletteLen, got, want)
+		}
+		for i := range width {
+			// Out-of-range indexes become paletteLen, the canonical bad value.
+			if got, want := index(row, i, depth), min(index(orig, i, depth), paletteLen); got != want {
+				t.Fatalf("depth %d, pixel %d: index %d, want %d", depth, i, got, want)
+			}
+		}
+		if used := width * depth % 8; used != 0 {
+			pad := byte(0xff >> used)
+			if row[len(row)-1]&pad != orig[len(orig)-1]&pad {
+				t.Fatalf("depth %d, width %d: padding bits changed", depth, width)
+			}
+		}
+	}
+}
