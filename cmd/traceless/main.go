@@ -43,14 +43,19 @@ const (
 )
 
 func main() {
-	if len(os.Args) < 2 {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run executes one command and returns the exit code.
+func run(args []string) int {
+	if len(args) == 0 {
 		fmt.Fprint(os.Stderr, usage)
-		os.Exit(exitUsage)
+		return exitUsage
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, args := args[0], args[1:]
 	code := exitOK
 	switch cmd {
 	case "inspect":
@@ -68,8 +73,7 @@ func main() {
 	if ctx.Err() != nil {
 		code = exitInterrupted
 	}
-	stop()
-	os.Exit(code)
+	return code
 }
 
 func runInspect(ctx context.Context, args []string) int {

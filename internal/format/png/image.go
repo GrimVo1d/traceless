@@ -100,7 +100,7 @@ func (ir *idatReader) drain() (int64, error) {
 	for {
 		n += int64(ir.end - ir.pos)
 		ir.pos = ir.end
-		if err := ir.fill(); err == io.EOF {
+		if err := ir.fill(); errors.Is(err, io.EOF) {
 			return n, nil
 		} else if err != nil {
 			return n, err
@@ -243,7 +243,7 @@ func imageErr(err error) error {
 
 // unusedBits returns a mask of the unused low bits in a row's last byte.
 func unusedBits(width uint32, bitsPerPixel int) byte {
-	used := uint64(width) * uint64(bitsPerPixel) % 8
+	used := uint64(width) * uint64(bitsPerPixel) % 8 //nolint:gosec // bitsPerPixel is at most 64
 	if used == 0 {
 		return 0
 	}
@@ -279,7 +279,8 @@ func fixIndexes(row []byte, width uint32, depth uint8, paletteLen int, fix bool)
 		if int(*b>>shift&mask) > paletteLen {
 			n++
 			if fix {
-				*b = *b&^(mask<<shift) | byte(paletteLen)<<shift
+				// paletteLen < 2^depth here, since a larger index exists.
+				*b = *b&^(mask<<shift) | byte(paletteLen)<<shift //nolint:gosec // see above
 			}
 		}
 	}
@@ -305,7 +306,7 @@ func unfilter(ft byte, row, prev []byte, off int) error {
 			if i >= off {
 				left = row[i-off]
 			}
-			row[i] += byte((int(left) + int(prev[i])) / 2)
+			row[i] += byte((int(left) + int(prev[i])) / 2) //nolint:gosec // an average of two bytes
 		}
 	case 4:
 		for i := range row {
@@ -323,7 +324,7 @@ func unfilter(ft byte, row, prev []byte, off int) error {
 
 // applyFilter writes the filter byte ft and row filtered with ft into dst.
 func applyFilter(ft int, dst, row, prev []byte, off int) {
-	dst[0] = byte(ft)
+	dst[0] = byte(ft) //nolint:gosec // filter types are 0 to 4
 	out := dst[1:]
 	for i := range row {
 		var left, upLeft byte
@@ -338,7 +339,7 @@ func applyFilter(ft int, dst, row, prev []byte, off int) {
 		case 2:
 			out[i] = row[i] - prev[i]
 		case 3:
-			out[i] = row[i] - byte((int(left)+int(prev[i]))/2)
+			out[i] = row[i] - byte((int(left)+int(prev[i]))/2) //nolint:gosec // an average of two bytes
 		case 4:
 			out[i] = row[i] - paeth(left, prev[i], upLeft)
 		}

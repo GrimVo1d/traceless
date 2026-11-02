@@ -12,6 +12,7 @@
 package png
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -22,12 +23,15 @@ import (
 // Handler handles PNG files.
 type Handler struct{}
 
+// Name implements format.Handler.
 func (Handler) Name() string { return "PNG" }
 
+// Match implements format.Handler.
 func (Handler) Match(header []byte) bool {
 	return strings.HasPrefix(string(header), signature)
 }
 
+// Inspect implements format.Handler.
 func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
 	p := &processor{mode: modeInspect}
 	if err := p.run(r); err != nil {
@@ -36,11 +40,13 @@ func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
 	return p.report.result(), nil
 }
 
+// Strip implements format.Handler.
 func (Handler) Strip(r io.Reader, w io.Writer) error {
 	p := &processor{mode: modeStrip, w: w}
 	return p.run(r)
 }
 
+// Verify implements format.Handler.
 func (Handler) Verify(r io.Reader) error {
 	p := &processor{mode: modeVerify}
 	return p.run(r)
@@ -84,7 +90,7 @@ func (p *processor) run(r io.Reader) error {
 
 	for {
 		h, err := cr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -125,7 +131,7 @@ func (p *processor) chunk(h chunkHeader) error {
 		return p.palette(h)
 
 	case h.Type == "IDAT":
-		return p.image(h)
+		return p.image()
 
 	case h.Type == "IEND":
 		if !l.sawImage {
@@ -181,7 +187,7 @@ func (p *processor) palette(h chunkHeader) error {
 	return p.keep(h, data)
 }
 
-func (p *processor) image(h chunkHeader) error {
+func (p *processor) image() error {
 	l := &p.layout
 	if l.sawImage {
 		return malformed("IDAT chunks are not consecutive")

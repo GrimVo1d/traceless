@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	// ErrUnknownFormat means no handler recognised the input. Unknown files
+	// ErrUnknownFormat means no handler recognized the input. Unknown files
 	// are never passed through as clean.
 	ErrUnknownFormat = errors.New("unknown or unsupported file format")
 

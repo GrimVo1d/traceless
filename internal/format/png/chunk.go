@@ -157,7 +157,7 @@ func (cr *chunkReader) Trailing() (int64, error) {
 // writeChunk writes one complete chunk with a freshly computed CRC.
 func writeChunk(w io.Writer, typ string, data []byte) error {
 	var buf [8]byte
-	binary.BigEndian.PutUint32(buf[:4], uint32(len(data)))
+	binary.BigEndian.PutUint32(buf[:4], uint32(len(data))) //nolint:gosec // callers write at most maxChunkLen bytes
 	copy(buf[4:], typ)
 	if _, err := w.Write(buf[:]); err != nil {
 		return err
@@ -211,7 +211,7 @@ func (cw *chunkWriter) Flush() error {
 }
 
 // readErr reports a short read as a malformed file. Other errors, such as a
-// failing disk or a cancelled context, are returned as they are.
+// failing disk or a canceled context, are returned as they are.
 func readErr(err error, msg string) error {
 	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return malformed("%s", msg)

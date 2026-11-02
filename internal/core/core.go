@@ -64,7 +64,7 @@ func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
 //
 // Output goes to a temporary file next to dst, is verified, and only then
 // moved into place, so dst never holds partial or unverified output.
-// Cancelling ctx stops the strip and removes the temporary file.
+// Canceling ctx stops the strip and removes the temporary file.
 func StripFile(ctx context.Context, src, dst string) (format.Handler, error) {
 	return stripFile(ctx, src, dst, false)
 }
@@ -174,7 +174,7 @@ func publish(tmp, dst string) (renamed bool, err error) {
 	return true, nil
 }
 
-// ctxReader fails reads once ctx is cancelled.
+// ctxReader fails reads once ctx is canceled.
 type ctxReader struct {
 	ctx context.Context
 	r   io.Reader
@@ -187,7 +187,7 @@ func (cr ctxReader) Read(p []byte) (int, error) {
 	return cr.r.Read(p)
 }
 
-// ctxWriter fails writes once ctx is cancelled.
+// ctxWriter fails writes once ctx is canceled.
 type ctxWriter struct {
 	ctx context.Context
 	w   io.Writer

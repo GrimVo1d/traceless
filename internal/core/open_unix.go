@@ -12,7 +12,7 @@ import (
 // without blocking and checks the type on the open descriptor, so a FIFO or
 // device swapped in after a check can't hang the tool or feed it endless data.
 func openRegular(path string) (*os.File, os.FileInfo, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) //nolint:gosec // opening the user's file is the point
 	if err != nil {
 		return nil, nil, err
 	}

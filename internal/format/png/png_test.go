@@ -465,7 +465,7 @@ func (f *failingReader) Read(p []byte) (int, error) {
 // wherever it happens.
 func TestReadErrors(t *testing.T) {
 	in := metadataPNG(t)
-	for n := range len(in) {
+	for n := range in {
 		var h Handler
 		err := h.Verify(&failingReader{bytes.NewReader(in), n, context.Canceled})
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, format.ErrMetadataRemains) {
