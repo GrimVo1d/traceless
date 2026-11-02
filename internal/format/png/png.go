@@ -8,16 +8,26 @@
 // Everything is streamed; memory use depends on the image width, not the file
 // size.
 //
+// The EXIF orientation of the first eXIf chunk before the image data is kept:
+// Strip writes it as a minimal eXIf chunk that holds nothing else.
+//
+// Verify is a fixed-point check: it rebuilds the file as Strip would and
+// passes only if the input is byte-identical to the result, so neither the
+// chunk layout nor the compressed stream can carry anything.
+//
 // Animated PNG (APNG) is not supported yet and fails closed.
 package png
 
 import (
+	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"traceless/internal/format"
+	"traceless/internal/format/exif"
 )
 
 // Handler handles PNG files.
@@ -46,10 +56,21 @@ func (Handler) Strip(r io.Reader, w io.Writer) error {
 	return p.run(r)
 }
 
-// Verify implements format.Handler.
+// errNotStripped is what Verify returns for a file that holds no metadata
+// Inspect can name but isn't what Strip writes.
+var errNotStripped = fmt.Errorf("png: %w: chunk layout or image compression differ from a stripped file", format.ErrMetadataRemains)
+
+// Verify implements format.Handler. It rebuilds the file as Strip would and
+// fails unless the result is byte-identical to the input.
 func (Handler) Verify(r io.Reader) error {
-	p := &processor{mode: modeVerify}
-	return p.run(r)
+	return format.VerifyFixedPoint(r, errNotStripped, func(in io.Reader, out io.Writer) error {
+		bw := bufio.NewWriter(out)
+		p := &processor{mode: modeVerify, w: bw}
+		if err := p.run(in); err != nil {
+			return err
+		}
+		return bw.Flush()
+	})
 }
 
 type mode int
@@ -64,13 +85,14 @@ const (
 // what is metadata and differ only in what they do with it: Inspect reports
 // it, Strip leaves it out of the output, Verify fails on it.
 type processor struct {
-	mode    mode
-	w       io.Writer // output, modeStrip only
-	cr      *chunkReader
-	layout  layout
-	report  format.Report
-	pending []pendingChunk // color space chunks not yet written
-	sawEXIF bool           // an eXIf chunk was decoded
+	mode        mode
+	w           io.Writer // output, nil in modeInspect
+	cr          *chunkReader
+	layout      layout
+	report      format.Report
+	pending     []pendingChunk // color space chunks not yet written
+	sawEXIF     bool           // an eXIf chunk was seen
+	orientation int            // EXIF orientation to keep, 0 if none
 }
 
 type pendingChunk struct {
@@ -148,6 +170,9 @@ func (p *processor) chunk(h chunkHeader) error {
 	case h.Type == "acTL" && !l.sawImage:
 		return unsupported("animated PNG (APNG)")
 
+	case h.Type == "eXIf" && !p.sawEXIF:
+		return p.exif(h)
+
 	case renderingChunks[h.Type]:
 		return p.rendering(h)
 	}
@@ -199,14 +224,15 @@ func (p *processor) image() error {
 	if err := p.flushColorSpace(); err != nil {
 		return err
 	}
+	if p.orientation != 0 {
+		if err := p.write(func() error { return writeChunk(p.w, "eXIf", orientationChunk(p.orientation)) }); err != nil {
+			return err
+		}
+	}
 	l.sawImage = true
 
 	ir := newIDATReader(p.cr)
-	var out io.Writer
-	if p.mode == modeStrip {
-		out = p.w
-	}
-	stats, err := processImage(l.hdr, l.paletteLen, ir, out)
+	stats, err := processImage(l.hdr, l.paletteLen, ir, p.w)
 	if err != nil {
 		return err
 	}
@@ -276,25 +302,58 @@ func (p *processor) flushColorSpace() error {
 	return nil
 }
 
+// exif handles the first eXIf chunk; the spec allows only one, and later
+// ones are dropped like any other chunk. Viewers rotate the image by the
+// Orientation tag of an eXIf chunk before the image data. That orientation is
+// kept, and the chunk itself only if it holds nothing else; Strip writes it
+// just before the image data.
+func (p *processor) exif(h chunkHeader) error {
+	p.sawEXIF = true
+	var data []byte // nil if too large to decode
+	if h.Length <= maxChunkRead {
+		// Read what is there rather than allocate the claimed length.
+		var err error
+		if data, err = io.ReadAll(p.cr.Data()); err != nil {
+			return err
+		}
+		if err := p.cr.Finish(); err != nil {
+			return err
+		}
+	}
+	if !p.layout.sawImage {
+		p.orientation = exif.Orientation(data)
+		if p.orientation < 2 {
+			p.orientation = 0 // 1 is the default: no chunk needed
+		}
+		if p.orientation != 0 && bytes.Equal(data, orientationChunk(p.orientation)) {
+			return nil
+		}
+	}
+	switch p.mode {
+	case modeVerify:
+		return fmt.Errorf("png: %w: eXIf chunk", format.ErrMetadataRemains)
+	case modeInspect:
+		// Only this chunk is decoded, so repeating a costly chunk can't
+		// multiply the work.
+		for _, f := range describeEXIF(h, data) {
+			p.report.Add(f, false, 0)
+		}
+	}
+	return nil
+}
+
+// orientationChunk returns the eXIf data stripped files carry for
+// orientation o, from 2 to 8: a minimal EXIF block holding only that tag.
+func orientationChunk(o int) []byte {
+	return exif.OrientationOnly(uint16(o)) //nolint:gosec // o is 2 to 8
+}
+
 // drop handles an ancillary chunk that is never kept.
 func (p *processor) drop(h chunkHeader) error {
 	switch p.mode {
 	case modeVerify:
 		return fmt.Errorf("png: %w: %s chunk", format.ErrMetadataRemains, h.Type)
 	case modeInspect:
-		// The spec allows one eXIf chunk. Only the first is decoded, so
-		// repeating a costly chunk can't multiply the work.
-		if h.Type == "eXIf" && !p.sawEXIF {
-			p.sawEXIF = true
-			fields, err := describeEXIF(h, p.cr.Data())
-			if err != nil {
-				return err
-			}
-			for _, f := range fields {
-				p.report.Add(f, false, 0)
-			}
-			return nil
-		}
 		f, grouped, err := describe(h, p.cr.Data())
 		if err != nil {
 			return err
@@ -315,7 +374,7 @@ func (p *processor) found(name, value string) error {
 	return nil
 }
 
-// keep writes a chunk to the output in modeStrip.
+// keep writes a chunk to the output, if there is one.
 func (p *processor) keep(h chunkHeader, data []byte) error {
 	l := &p.layout
 	l.seen[h.Type] = true
@@ -329,7 +388,7 @@ func (p *processor) keep(h chunkHeader, data []byte) error {
 }
 
 func (p *processor) write(fn func() error) error {
-	if p.mode != modeStrip {
+	if p.w == nil {
 		return nil
 	}
 	return fn()

@@ -169,3 +169,16 @@ func chunkTypes(b []byte) []string {
 	}
 	return types
 }
+
+// chunkData returns the data of the first chunk of type typ in a well-formed
+// file, or nil if there is none.
+func chunkData(b []byte, typ string) []byte {
+	for i := len(signature); i+8 <= len(b); {
+		n := int(binary.BigEndian.Uint32(b[i:]))
+		if string(b[i+4:i+8]) == typ {
+			return b[i+8 : i+8+n]
+		}
+		i += 12 + n
+	}
+	return nil
+}

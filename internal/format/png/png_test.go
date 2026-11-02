@@ -10,6 +10,7 @@ import (
 	"image"
 	stdpng "image/png"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"testing"
 
 	"traceless/internal/format"
+	"traceless/internal/format/exif"
 	"traceless/internal/format/exif/exiftest"
 )
 
@@ -166,10 +168,105 @@ func TestStrip(t *testing.T) {
 	in := metadataPNG(t)
 	out := strip(t, in)
 	assertCleanCopy(t, in, out)
-	for _, secret := range []string{"Jane", "Pixel", "SECRET", "private", "eXIf", "tIME"} {
+	for _, secret := range []string{"Jane", "Pixel", "SECRET", "private", "tIME"} {
 		if bytes.Contains(out, []byte(secret)) {
 			t.Errorf("output still contains %q", secret)
 		}
+	}
+	// The photo is rotated: only its orientation survives.
+	if got := chunkData(out, "eXIf"); !bytes.Equal(got, orientationChunk(6)) {
+		t.Errorf("eXIf = %q, want orientation 6 only", got)
+	}
+}
+
+func TestOrientation(t *testing.T) {
+	be := binary.BigEndian
+	rotated := encodeChunk("eXIf", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint16{6}}}}))
+	upright := encodeChunk("eXIf", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint16{1}}}}))
+	gama := encodeChunk("gAMA", []byte{0, 0, 0xb1, 0x8f})
+	ihdr, idat := plainChunks()
+	tests := []struct {
+		name   string
+		chunks [][]byte // between IHDR and IEND
+		want   int      // orientation in the output, 0 for no eXIf
+	}{
+		{"photo", [][]byte{encodeChunk("eXIf", exiftest.Photo(be)), idat}, 6},
+		{"little-endian", [][]byte{encodeChunk("eXIf", exiftest.Photo(binary.LittleEndian)), idat}, 6},
+		{"only orientation", [][]byte{rotated, idat}, 6},
+		{"before other chunks", [][]byte{rotated, gama, idat}, 6},
+		{"upright", [][]byte{upright, idat}, 0},
+		{"none", [][]byte{idat}, 0},
+		{"first chunk wins", [][]byte{upright, rotated, idat}, 0},
+		{"after the image data", [][]byte{idat, rotated}, 0},
+		{"broken EXIF", [][]byte{encodeChunk("eXIf", []byte("MM\x00*\x00\x00\xff\xff")), idat}, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := pngOf(append(append([][]byte{ihdr}, tt.chunks...), iendChunk)...)
+			out := strip(t, in)
+			data := chunkData(out, "eXIf")
+			got := exif.Orientation(data)
+			if data != nil && !bytes.Equal(data, orientationChunk(got)) {
+				t.Errorf("eXIf holds more than the orientation: %q", data)
+			}
+			if got != tt.want {
+				t.Errorf("orientation %d, want %d", got, tt.want)
+			}
+			// Strip writes eXIf just before the image data.
+			if types := chunkTypes(out); data != nil && types[slices.Index(types, "IDAT")-1] != "eXIf" {
+				t.Errorf("chunks %v, want eXIf right before IDAT", types)
+			}
+			assertCleanCopy(t, in, out)
+		})
+	}
+}
+
+// A file that is just what Strip writes for a rotated image is clean.
+func TestOrientationChunkIsClean(t *testing.T) {
+	ihdr, idat := plainChunks()
+	in := strip(t, pngOf(ihdr, encodeChunk("eXIf", orientationChunk(8)), idat, iendChunk))
+	if got := chunkData(in, "eXIf"); !bytes.Equal(got, orientationChunk(8)) {
+		t.Fatalf("eXIf = %q, want orientation 8", got)
+	}
+	assertCleanCopy(t, in, in)
+	if out := strip(t, in); !bytes.Equal(out, in) {
+		t.Error("Strip changed the file")
+	}
+}
+
+// Verify passes only files byte-identical to their Strip output. These hold
+// no metadata, so Inspect reports nothing, but their chunk layout or
+// compression differs from ours: the same freedom could carry data.
+func TestVerifyRequiresCanonicalForm(t *testing.T) {
+	ihdr, idat := plainChunks()
+	canonical := strip(t, pngOf(ihdr, encodeChunk("eXIf", orientationChunk(3)), encodeChunk("gAMA", []byte{0, 0, 0xb1, 0x8f}), idat, iendChunk))
+	split := func(b []byte) []byte { // the IDAT data in two chunks
+		d := chunkData(b, "IDAT")
+		ihdr := b[len(signature) : len(signature)+25]
+		return pngOf(ihdr, encodeChunk("IDAT", d[:5]), encodeChunk("IDAT", d[5:]), iendChunk)
+	}
+	// The canonical eXIf chunk moved in front of gAMA.
+	exifChunk := encodeChunk("eXIf", orientationChunk(3))
+	moved := withChunks(bytes.Replace(canonical, exifChunk, nil, 1), exifChunk)
+	tests := map[string][]byte{
+		"stdlib":                basePNG(t),
+		"interlaced":            interlacedPNG(),
+		"other compression":     pngOf(ihdr, idat, iendChunk),
+		"split image data":      split(strip(t, pngOf(ihdr, idat, iendChunk))),
+		"eXIf in another place": moved,
+	}
+
+	var h Handler
+	for name, in := range tests {
+		t.Run(name, func(t *testing.T) {
+			if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+				t.Errorf("Inspect = %v, %v; want no fields", fields, err)
+			}
+			if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
+			}
+			assertCleanCopy(t, in, strip(t, in))
+		})
 	}
 }
 
@@ -575,6 +672,58 @@ func TestInspectClipsNames(t *testing.T) {
 
 // TestFixture keeps testdata/metadata.png, a file with known metadata used by
 // the fuzz corpus and the leak checker. Regenerate it with -update.
+// noisePNG encodes a width x height image of random pixels, which don't
+// compress.
+func noisePNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	rng := rand.New(rand.NewPCG(1, 2))
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rng.Uint32())
+	}
+	var buf bytes.Buffer
+	if err := stdpng.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// Verify compares the input with the rebuilt file as both stream; a stripped
+// file larger than what the comparison may hold must still pass.
+func TestVerifyLargeImage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	out := strip(t, noisePNG(t, 1200, 1200))
+	if len(out) <= 4<<20 { // format.maxLag
+		t.Fatalf("stripped file has only %d bytes", len(out))
+	}
+	if err := (Handler{}).Verify(bytes.NewReader(out)); err != nil {
+		t.Errorf("Verify: %v", err)
+	}
+}
+
+// Verify passes only files byte-identical to what Strip writes, and that
+// depends on compress/flate. If this test fails after a Go update, files
+// stripped by earlier builds now fail Verify: say so in the release notes,
+// then run go test -run TestStripGolden -update.
+func TestStripGolden(t *testing.T) {
+	path := filepath.Join("testdata", "stripped.png")
+	out := strip(t, noisePNG(t, 64, 48))
+	if *update {
+		if err := os.WriteFile(path, out, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	golden, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("%v (run go test -run TestStripGolden -update)", err)
+	}
+	if !bytes.Equal(out, golden) {
+		t.Error("Strip output changed (see the comment on TestStripGolden)")
+	}
+}
+
 func TestFixture(t *testing.T) {
 	path := filepath.Join("testdata", "metadata.png")
 	if *update {
