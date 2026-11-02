@@ -18,7 +18,8 @@ const maxRowBytes = 4 << 20
 
 // maxPixels caps the image area (16384 x 16384). Work grows with the pixel
 // count the header claims, not with the file size, and deflate compresses
-// about 1000:1, so without a cap a small file could cost minutes of CPU.
+// about 1000:1. Even with the cap, a 2 MB file can decode to 2 GiB and take
+// about 30 seconds to strip, so a server needs its own time budget.
 const maxPixels = 1 << 28
 
 // header holds the parsed IHDR chunk.
@@ -138,8 +139,8 @@ func span(size, start, step uint32) uint32 {
 //   - sBIT: the original sample depth reveals the source; viewers don't need it.
 //
 // What stays can still hold a few dozen bytes chosen by whoever made the
-// file: gAMA, cHRM, mDCV and cLLI are arbitrary integers by design, and
-// viewers use them, so they can't be dropped without changing colors.
+// file: gAMA, cHRM, mDCV and cLLI values are only range-checked, and viewers
+// use them, so they can't be dropped without changing colors.
 var renderingChunks = map[string]bool{
 	"tRNS": true, "gAMA": true, "cHRM": true, "sRGB": true,
 	"bKGD": true, "cICP": true, "mDCV": true, "cLLI": true,
@@ -222,8 +223,20 @@ func (l *layout) checkValues(typ string, data []byte) string {
 			return "invalid rendering intent"
 		}
 	case "gAMA":
-		if binary.BigEndian.Uint32(data) == 0 {
-			return "zero gamma"
+		// libpng ignores gamma values outside this range.
+		if g := binary.BigEndian.Uint32(data); g < 16 || g > 625000000 {
+			return "gamma out of range"
+		}
+	case "cHRM":
+		// x,y pairs in units of 0.00001: white point, red, green, blue.
+		if !validXY(uints(data, 4), 100000, 0) {
+			return "invalid chromaticities"
+		}
+	case "mDCV":
+		// x,y pairs in units of 0.00002: red, green, blue, white point;
+		// then two luminance values.
+		if !validXY(uints(data[:16], 2), 50000, 3) {
+			return "invalid chromaticities"
 		}
 	case "cICP":
 		// Only RGB (matrix 0) is valid for PNG; the range flag is 0 or 1.
@@ -245,6 +258,36 @@ func (l *layout) checkValues(typ string, data []byte) string {
 		}
 	}
 	return ""
+}
+
+// validXY checks x,y chromaticity pairs in fixed point, where one stands for
+// 1.0, with the white point's pair at index white. A chromaticity lies in
+// [0, 1] with x + y <= 1, and a white point needs y > 0 (at least 5 units,
+// like libpng). Decoders ignore chunks with other values.
+func validXY(xy []uint32, one uint32, white int) bool {
+	for i := 0; i+1 < len(xy); i += 2 {
+		x, y := xy[i], xy[i+1]
+		if x > one || y > one-x {
+			return false
+		}
+		if i/2 == white && y < 5 {
+			return false
+		}
+	}
+	return true
+}
+
+// uints decodes big-endian unsigned integers of size bytes each.
+func uints(data []byte, size int) []uint32 {
+	v := make([]uint32, 0, len(data)/size)
+	for i := 0; i+size <= len(data); i += size {
+		if size == 2 {
+			v = append(v, uint32(binary.BigEndian.Uint16(data[i:])))
+		} else {
+			v = append(v, binary.BigEndian.Uint32(data[i:]))
+		}
+	}
+	return v
 }
 
 // overridden returns why a buffered color space chunk is unused given the

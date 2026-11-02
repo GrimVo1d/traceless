@@ -2,11 +2,14 @@ package png
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"image"
 	stdpng "image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -144,7 +147,7 @@ func TestStripImageKinds(t *testing.T) {
 
 func TestStripKeepsRenderingChunks(t *testing.T) {
 	gama := encodeChunk("gAMA", []byte{0, 0, 0xb1, 0x8f})
-	chrm := encodeChunk("cHRM", make([]byte, 32))
+	chrm := encodeChunk("cHRM", srgbChromaticities())
 	text := encodeChunk("tEXt", []byte("Software\x00Editor 1.0"))
 	ihdr, idat := plainChunks()
 	in := pngOf(ihdr, gama, text, chrm, idat, iendChunk)
@@ -162,6 +165,76 @@ func TestStripKeepsRenderingChunks(t *testing.T) {
 	if got, want := chunkTypes(pal), []string{"IHDR", "PLTE", "tRNS", "bKGD", "IDAT", "IEND"}; !slices.Equal(got, want) {
 		t.Errorf("palette chunks %v, want %v", got, want)
 	}
+
+	// mDCV and cLLI are used together with cICP.
+	hdr := pngOf(ihdr, encodeChunk("cICP", []byte{9, 16, 0, 1}), encodeChunk("mDCV", validMDCV()),
+		encodeChunk("cLLI", []byte{0, 0x0f, 0x42, 0x40, 0, 0x03, 0x0d, 0x40}), idat, iendChunk)
+	if got, want := chunkTypes(strip(t, hdr)), []string{"IHDR", "cICP", "mDCV", "cLLI", "IDAT", "IEND"}; !slices.Equal(got, want) {
+		t.Errorf("HDR chunks %v, want %v", got, want)
+	}
+
+	// A transparent gray value that fits a 4-bit sample.
+	gray := pngOf(ihdrChunk(4, 1, 4, colorGray, 0), encodeChunk("tRNS", []byte{0, 15}),
+		encodeChunk("IDAT", deflate([]byte{0, 0x0f, 0x37})), iendChunk)
+	if got, want := chunkTypes(strip(t, gray)), []string{"IHDR", "tRNS", "IDAT", "IEND"}; !slices.Equal(got, want) {
+		t.Errorf("gray chunks %v, want %v", got, want)
+	}
+}
+
+// srgbChromaticities returns cHRM data for the sRGB white point and primaries.
+func srgbChromaticities() []byte {
+	var b []byte
+	for _, v := range []uint32{31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000} {
+		b = binary.BigEndian.AppendUint32(b, v)
+	}
+	return b
+}
+
+// validMDCV returns mDCV data for a Display P3 mastering display.
+func validMDCV() []byte {
+	var b []byte
+	for _, v := range []uint16{34000, 16000, 13250, 34500, 7500, 3000, 15635, 16450} {
+		b = binary.BigEndian.AppendUint16(b, v)
+	}
+	b = binary.BigEndian.AppendUint32(b, 10_000_000)
+	return binary.BigEndian.AppendUint32(b, 1)
+}
+
+func TestCheckValues(t *testing.T) {
+	l := layout{hdr: header{colorType: colorRGB, depth: 8}}
+	u32 := func(v uint32) []byte { return binary.BigEndian.AppendUint32(nil, v) }
+	chrm := func(i int, v uint32) []byte {
+		b := srgbChromaticities()
+		binary.BigEndian.PutUint32(b[4*i:], v)
+		return b
+	}
+	tests := []struct {
+		typ   string
+		data  []byte
+		valid bool
+	}{
+		{"gAMA", u32(15), false},
+		{"gAMA", u32(16), true},
+		{"gAMA", u32(45455), true},
+		{"gAMA", u32(625000000), true},
+		{"gAMA", u32(625000001), false},
+		{"cHRM", srgbChromaticities(), true},
+		{"cHRM", make([]byte, 32), false}, // white point y = 0
+		{"cHRM", chrm(1, 4), false},       // white point y too small
+		{"cHRM", chrm(2, 100001), false},  // red x > 1
+		{"cHRM", chrm(3, 70000), false},   // red x + y > 1
+		{"cHRM", chrm(3, 0), true},        // wide gamut primaries may sit on an axis
+		{"mDCV", validMDCV(), true},
+		{"mDCV", append([]byte{0xc3, 0x51}, validMDCV()[2:]...), false}, // x = 50001
+		{"cICP", []byte{1, 13, 0, 1}, true},
+		{"cICP", []byte{1, 13, 1, 1}, false},
+		{"cICP", []byte{1, 13, 0, 2}, false},
+	}
+	for _, tt := range tests {
+		if got := l.checkValues(tt.typ, tt.data) == ""; got != tt.valid {
+			t.Errorf("%s %x: valid = %v, want %v", tt.typ, tt.data, got, tt.valid)
+		}
+	}
 }
 
 // Each case hides data where a decoder never looks. Strip must remove it,
@@ -171,6 +244,9 @@ func TestHiddenData(t *testing.T) {
 	ihdr, idat := plainChunks()
 	stream := testStream()
 	gama := encodeChunk("gAMA", []byte{0, 0, 0xb1, 0x8f})
+	palIHDR := ihdrChunk(4, 1, 8, colorPalette, 0)
+	plte := encodeChunk("PLTE", []byte{9, 9, 9, 1, 2, 3})
+	palIDAT := encodeChunk("IDAT", deflate([]byte{0, 0, 1, 0, 1}))
 
 	tests := []struct {
 		name  string
@@ -218,15 +294,46 @@ func TestHiddenData(t *testing.T) {
 		{"zero gamma",
 			pngOf(ihdr, encodeChunk("gAMA", make([]byte, 4)), idat, iendChunk),
 			"gAMA chunk", nil},
+		{"gamma out of range",
+			pngOf(ihdr, encodeChunk("gAMA", []byte(secret[:4])), idat, iendChunk),
+			"gAMA chunk", nil},
+		{"invalid chromaticities",
+			pngOf(ihdr, encodeChunk("cHRM", []byte(secret[:30]+"..")), idat, iendChunk),
+			"cHRM chunk", nil},
 		{"gAMA overridden by sRGB",
-			pngOf(ihdr, encodeChunk("gAMA", []byte(secret[:4])), encodeChunk("sRGB", []byte{0}), idat, iendChunk),
+			pngOf(ihdr, gama, encodeChunk("sRGB", []byte{0}), idat, iendChunk),
 			"gAMA chunk", nil},
 		{"sRGB overridden by cICP",
 			pngOf(ihdr, encodeChunk("sRGB", []byte{0}), encodeChunk("cICP", []byte{1, 13, 0, 1}), idat, iendChunk),
 			"sRGB chunk", nil},
 		{"mDCV without cICP",
-			pngOf(ihdr, encodeChunk("mDCV", []byte(secret[:24])), idat, iendChunk),
+			pngOf(ihdr, encodeChunk("mDCV", validMDCV()), idat, iendChunk),
 			"mDCV chunk", nil},
+		{"cLLI without cICP",
+			pngOf(ihdr, encodeChunk("cLLI", []byte{0, 0x0f, 0x42, 0x40, 0, 0x03, 0x0d, 0x40}), idat, iendChunk),
+			"cLLI chunk", nil},
+		{"invalid mastering display",
+			pngOf(ihdr, encodeChunk("cICP", []byte{9, 16, 0, 1}), encodeChunk("mDCV", []byte(secret[:24])), idat, iendChunk),
+			"mDCV chunk", nil},
+		{"invalid cICP matrix",
+			pngOf(ihdr, encodeChunk("cICP", []byte{1, 13, 1, 1}), idat, iendChunk),
+			"cICP chunk", nil},
+		{"gAMA after PLTE",
+			pngOf(palIHDR, plte, gama, palIDAT, iendChunk),
+			"gAMA chunk", nil},
+		{"palette background out of range",
+			pngOf(palIHDR, plte, encodeChunk("bKGD", []byte{2}), palIDAT, iendChunk),
+			"bKGD chunk", nil},
+		{"tRNS longer than PLTE",
+			pngOf(palIHDR, plte, encodeChunk("tRNS", []byte{1, 2, 3}), palIDAT, iendChunk),
+			"tRNS chunk", pngOf(palIHDR, plte, palIDAT, iendChunk)},
+		{"tRNS before PLTE",
+			pngOf(palIHDR, encodeChunk("tRNS", []byte{1}), plte, palIDAT, iendChunk),
+			"tRNS chunk", pngOf(palIHDR, plte, palIDAT, iendChunk)},
+		{"gray transparency out of range",
+			pngOf(ihdrChunk(4, 1, 4, colorGray, 0), encodeChunk("tRNS", []byte{0, 16}),
+				encodeChunk("IDAT", deflate([]byte{0, 0x0f, 0x37})), iendChunk),
+			"tRNS chunk", nil},
 		{"background sample out of range",
 			pngOf(ihdr, encodeChunk("bKGD", []byte("SECRET")), idat, iendChunk),
 			"bKGD chunk", nil},
@@ -315,6 +422,8 @@ func TestRejectsInvalidInput(t *testing.T) {
 		{"palette image without PLTE", pngOf(ihdrChunk(4, 4, 8, colorPalette, 0), idat, iendChunk), format.ErrMalformed, nil},
 		{"PLTE in grayscale", pngOf(ihdrChunk(4, 4, 8, colorGray, 0), encodeChunk("PLTE", make([]byte, 3)), idat, iendChunk), format.ErrMalformed, nil},
 		{"duplicate IHDR", pngOf(ihdr, ihdr, idat, iendChunk), format.ErrMalformed, nil},
+		{"PLTE too long for bit depth", pngOf(ihdrChunk(4, 1, 1, colorPalette, 0), encodeChunk("PLTE", make([]byte, 9)),
+			encodeChunk("IDAT", deflate([]byte{0, 0})), iendChunk), format.ErrMalformed, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -333,6 +442,39 @@ func TestRejectsInvalidInput(t *testing.T) {
 				t.Errorf("Verify = %v, want %v", err, wantVerify)
 			}
 		})
+	}
+}
+
+// failingReader returns err once n bytes have been read.
+type failingReader struct {
+	r   io.Reader
+	n   int
+	err error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, f.err
+	}
+	n, err := f.r.Read(p[:min(len(p), f.n)])
+	f.n -= n
+	return n, err
+}
+
+// A read error is not a malformed file: it must reach the caller unchanged,
+// wherever it happens.
+func TestReadErrors(t *testing.T) {
+	in := metadataPNG(t)
+	for n := range len(in) {
+		var h Handler
+		err := h.Verify(&failingReader{bytes.NewReader(in), n, context.Canceled})
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, format.ErrMetadataRemains) {
+			t.Fatalf("error after %d bytes: Verify = %v, want context.Canceled", n, err)
+		}
+		err = h.Strip(&failingReader{bytes.NewReader(in), n, context.Canceled}, io.Discard)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error after %d bytes: Strip = %v, want context.Canceled", n, err)
+		}
 	}
 }
 

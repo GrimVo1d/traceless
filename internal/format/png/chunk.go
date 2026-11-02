@@ -2,6 +2,7 @@ package png
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -28,8 +29,9 @@ func (h chunkHeader) critical() bool {
 }
 
 // chunkReader walks the chunks of a PNG stream. It validates the framing
-// (signature, IHDR first, chunk types, lengths, CRCs, IEND last) and never
-// allocates memory based on lengths read from the input.
+// (signature, IHDR first, chunk types, lengths, CRCs, IEND last). Only
+// ReadAll allocates memory based on a length read from the input, and its
+// callers cap that length first.
 type chunkReader struct {
 	r       io.Reader
 	crc     hash.Hash32
@@ -44,7 +46,7 @@ type chunkReader struct {
 func newChunkReader(r io.Reader) (*chunkReader, error) {
 	var sig [len(signature)]byte
 	if _, err := io.ReadFull(r, sig[:]); err != nil {
-		return nil, malformed("truncated signature")
+		return nil, readErr(err, "truncated signature")
 	}
 	if string(sig[:]) != signature {
 		return nil, malformed("bad signature")
@@ -61,7 +63,7 @@ func (cr *chunkReader) Next() (chunkHeader, error) {
 		return h, nil
 	}
 	if cr.open {
-		if _, err := cr.Finish(); err != nil {
+		if err := cr.Finish(); err != nil {
 			return chunkHeader{}, err
 		}
 	}
@@ -71,7 +73,7 @@ func (cr *chunkReader) Next() (chunkHeader, error) {
 
 	var buf [8]byte
 	if _, err := io.ReadFull(cr.r, buf[:]); err != nil {
-		return chunkHeader{}, malformed("truncated chunk header (missing IEND)")
+		return chunkHeader{}, readErr(err, "truncated chunk header (missing IEND)")
 	}
 	n := binary.BigEndian.Uint32(buf[:4])
 	typ := buf[4:8]
@@ -120,32 +122,31 @@ func (cr *chunkReader) Data() io.Reader {
 func (cr *chunkReader) ReadAll(h chunkHeader) ([]byte, error) {
 	data := make([]byte, h.Length)
 	if _, err := io.ReadFull(cr.data, data); err != nil {
-		return nil, malformed("truncated chunk data")
+		return nil, readErr(err, "truncated chunk data")
 	}
-	if _, err := cr.Finish(); err != nil {
+	if err := cr.Finish(); err != nil {
 		return nil, err
 	}
 	return data, nil
 }
 
-// Finish skips any unread data of the current chunk, checks its CRC and
-// returns the stored CRC bytes.
-func (cr *chunkReader) Finish() ([4]byte, error) {
+// Finish skips any unread data of the current chunk and checks its CRC.
+func (cr *chunkReader) Finish() error {
 	var stored [4]byte
 	cr.open = false
 	if _, err := io.Copy(io.Discard, cr.data); err != nil {
-		return stored, err
+		return err
 	}
 	if cr.limit.N != 0 {
-		return stored, malformed("truncated chunk data")
+		return malformed("truncated chunk data")
 	}
 	if _, err := io.ReadFull(cr.r, stored[:]); err != nil {
-		return stored, malformed("truncated chunk CRC")
+		return readErr(err, "truncated chunk CRC")
 	}
 	if binary.BigEndian.Uint32(stored[:]) != cr.crc.Sum32() {
-		return stored, malformed("chunk CRC mismatch")
+		return malformed("chunk CRC mismatch")
 	}
-	return stored, nil
+	return nil
 }
 
 // Trailing counts the bytes after IEND. Call it only after Next returned io.EOF.
@@ -206,6 +207,15 @@ func (cw *chunkWriter) Flush() error {
 	}
 	err := writeChunk(cw.w, cw.typ, cw.buf)
 	cw.buf = cw.buf[:0]
+	return err
+}
+
+// readErr reports a short read as a malformed file. Other errors, such as a
+// failing disk or a cancelled context, are returned as they are.
+func readErr(err error, msg string) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return malformed("%s", msg)
+	}
 	return err
 }
 

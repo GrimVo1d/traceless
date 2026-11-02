@@ -301,7 +301,7 @@ func (p *processor) keep(h chunkHeader, data []byte) error {
 	l.seen[h.Type] = true
 	if h.Type == "IEND" {
 		// Validate the CRC before finishing.
-		if _, err := p.cr.Finish(); err != nil {
+		if err := p.cr.Finish(); err != nil {
 			return err
 		}
 	}
