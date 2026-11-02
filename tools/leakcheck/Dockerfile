@@ -1,4 +1,6 @@
-# Isolated exiftool + mat2 environment used by the leak-checker agent.
+# exiftool and mat2 in a container, for cross-checking stripped files:
+#   docker build -t traceless-leakcheck tools/leakcheck
+#   docker run --rm -v "$PWD":/files:ro traceless-leakcheck exiftool -a -G1 -s photo.clean.png
 FROM debian:bookworm-slim
 
 RUN apt-get update \
