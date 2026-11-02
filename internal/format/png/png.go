@@ -70,6 +70,7 @@ type processor struct {
 	layout  layout
 	report  report
 	pending []pendingChunk // color space chunks not yet written
+	sawEXIF bool           // an eXIf chunk was decoded
 }
 
 type pendingChunk struct {
@@ -281,6 +282,19 @@ func (p *processor) drop(h chunkHeader) error {
 	case modeVerify:
 		return fmt.Errorf("png: %w: %s chunk", format.ErrMetadataRemains, h.Type)
 	case modeInspect:
+		// The spec allows one eXIf chunk. Only the first is decoded, so
+		// repeating a costly chunk can't multiply the work.
+		if h.Type == "eXIf" && !p.sawEXIF {
+			p.sawEXIF = true
+			fields, err := describeEXIF(h, p.cr.Data())
+			if err != nil {
+				return err
+			}
+			for _, f := range fields {
+				p.report.add(f, false, 0)
+			}
+			return nil
+		}
 		f, grouped, err := describe(h, p.cr.Data())
 		if err != nil {
 			return err

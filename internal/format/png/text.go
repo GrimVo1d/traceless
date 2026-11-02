@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"traceless/internal/format"
+	"traceless/internal/format/exif"
 )
 
 const (
@@ -28,8 +29,6 @@ const (
 func describe(h chunkHeader, data io.Reader) (f format.Field, grouped bool, err error) {
 	switch h.Type {
 	case "tEXt", "zTXt", "iTXt", "tIME", "iCCP":
-	case "eXIf":
-		return format.Field{Name: "EXIF", Value: fmt.Sprintf("%d bytes", h.Length)}, true, nil
 	default:
 		return format.Field{Name: h.Type + " chunk", Value: fmt.Sprintf("%d bytes", h.Length)}, true, nil
 	}
@@ -60,6 +59,26 @@ func describe(h chunkHeader, data io.Reader) (f format.Field, grouped bool, err 
 		value += " (truncated)"
 	}
 	return format.Field{Name: clip(name, maxNameLen), Value: clip(value, maxValueLen)}, false, nil
+}
+
+// describeEXIF decodes an eXIf chunk into one field per tag. EXIF that can't
+// be fully decoded is still reported, with what was read and the reason.
+func describeEXIF(h chunkHeader, data io.Reader) ([]format.Field, error) {
+	if h.Length > maxChunkRead {
+		return []format.Field{{Name: "EXIF", Value: fmt.Sprintf("%d bytes (too large to decode)", h.Length)}}, nil
+	}
+	b, err := io.ReadAll(data)
+	if err != nil {
+		return nil, err
+	}
+	fields, err := exif.Parse(b)
+	switch {
+	case err != nil:
+		fields = append(fields, format.Field{Name: "EXIF", Value: fmt.Sprintf("%d bytes, %v", h.Length, err)})
+	case len(fields) == 0:
+		fields = append(fields, format.Field{Name: "EXIF", Value: fmt.Sprintf("%d bytes, no tags", h.Length)})
+	}
+	return fields, nil
 }
 
 // parseText decodes a tEXt chunk: keyword, NUL, Latin-1 text.

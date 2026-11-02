@@ -9,6 +9,8 @@ import (
 	"image/color"
 	stdpng "image/png"
 	"testing"
+
+	"traceless/internal/format/exif/exiftest"
 )
 
 // ihdrEnd is the offset right after the IHDR chunk: 8 bytes of signature
@@ -108,7 +110,7 @@ func metadataPNG(tb testing.TB) []byte {
 		encodeChunk("zTXt", join([]byte("Comment\x00\x00"), deflate([]byte("taken at home")))),
 		encodeChunk("iTXt", join([]byte("XML:com.adobe.xmp\x00\x01\x00en\x00\x00"),
 			deflate([]byte("<x:xmpmeta>GPS 52.5200,13.4050</x:xmpmeta>")))),
-		encodeChunk("eXIf", []byte("MM\x00\x2a\x00\x00\x00\x08\x00\x00")),
+		encodeChunk("eXIf", exiftest.Photo(binary.BigEndian)),
 		encodeChunk("tIME", []byte{0x07, 0xe8, 5, 1, 12, 30, 0}),
 		encodeChunk("prVt", []byte("private app data")),
 	)

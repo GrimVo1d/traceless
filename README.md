@@ -20,9 +20,13 @@ $ traceless inspect photo.png
 photo.png (PNG):
   ICC profile: Pixel 7 Pro camera (49 bytes)
   tEXt Author: Jane Doe
-  zTXt Comment: taken at home
-  iTXt XML:com.adobe.xmp [en]: <x:xmpmeta>GPS 52.5200,13.4050</x:xmpmeta>
-  EXIF: 10 bytes
+  ...
+  EXIF Model: Pixel 7 Pro
+  ...
+  EXIF CameraOwnerName: Jane Doe
+  EXIF BodySerialNumber: SN-1234567
+  EXIF GPS position: 52.520000, 13.405000
+  EXIF Thumbnail: 5120 bytes
   Modified: 2024-05-01 12:30:00 UTC
   prVt chunk: 16 bytes
   Trailing data: 14 bytes after IEND
@@ -113,8 +117,6 @@ traceless never overwrites an existing file unless you pass `-inplace`.
 - Animated PNG (APNG) is refused for now.
 - ICC color profiles are removed, so wide-gamut images (e.g. Display P3
   screenshots) can look slightly different.
-- EXIF is reported by size only; its tags (such as GPS) aren't decoded yet.
-  Stripping removes it either way.
 - Color values viewers need (gamma, primaries; about 70 bytes) are
   range-checked but kept as they are, and so are unused palette entries.
 - Data hidden in the pixel values themselves (steganography) is out of scope.

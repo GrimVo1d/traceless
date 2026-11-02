@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"traceless/internal/format"
+	"traceless/internal/format/exif/exiftest"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata fixtures")
@@ -89,7 +90,9 @@ func TestInspect(t *testing.T) {
 		"tEXt Author":                 "Jane Doe",
 		"zTXt Comment":                "taken at home",
 		"iTXt XML:com.adobe.xmp [en]": "<x:xmpmeta>GPS 52.5200,13.4050</x:xmpmeta>",
-		"EXIF":                        "10 bytes",
+		"EXIF Model":                  "Pixel 7 Pro",
+		"EXIF CameraOwnerName":        "Jane Doe",
+		"EXIF GPS position":           "52.520000, 13.405000",
 		"Modified":                    "2024-05-01 12:30:00 UTC",
 		"prVt chunk":                  "16 bytes",
 		"Trailing data":               "14 bytes after IEND",
@@ -99,8 +102,47 @@ func TestInspect(t *testing.T) {
 			t.Errorf("%s = %q, want prefix %q", name, got[name], value)
 		}
 	}
-	if len(got) != len(want) {
-		t.Errorf("got %d fields, want %d: %v", len(got), len(want), got)
+	for name := range got {
+		if _, ok := want[name]; !ok && !strings.HasPrefix(name, "EXIF ") {
+			t.Errorf("unexpected field %s", name)
+		}
+	}
+}
+
+// Only the first eXIf chunk is decoded; repeats are reported by size, so a
+// costly chunk can't be multiplied.
+func TestInspectDecodesOneEXIF(t *testing.T) {
+	ihdr, idat := plainChunks()
+	exifChunk := encodeChunk("eXIf", exiftest.Photo(binary.BigEndian))
+	in := pngOf(ihdr, exifChunk, exifChunk, exifChunk, idat, iendChunk)
+	fields, err := Handler{}.Inspect(bytes.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	models, sizes := 0, ""
+	for _, f := range fields {
+		switch f.Name {
+		case "EXIF Model":
+			models++
+		case "eXIf chunk":
+			sizes = f.Value
+		}
+	}
+	if models != 1 || !strings.HasPrefix(sizes, "2 chunks") {
+		t.Errorf("decoded %d EXIF blocks, repeats %q; want 1 and 2 chunks", models, sizes)
+	}
+}
+
+// EXIF that can't be decoded is still reported, with the reason.
+func TestInspectMalformedEXIF(t *testing.T) {
+	ihdr, idat := plainChunks()
+	in := pngOf(ihdr, encodeChunk("eXIf", []byte("MM\x00*\x00\x00\xff\xff")), idat, iendChunk)
+	fields, err := Handler{}.Inspect(bytes.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fieldMap(fields)["EXIF"]; !strings.Contains(got, "malformed") {
+		t.Errorf("EXIF = %q, want a malformed note", got)
 	}
 }
 
