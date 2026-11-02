@@ -105,21 +105,32 @@ go build -o traceless ./cmd/traceless
 
 traceless never overwrites an existing file unless you pass `-inplace`.
 
+For JPEG, `verify` is strict: it passes only files that are exactly what
+`strip` writes, since an encoder's free choices (Huffman tables, header
+bytes) can hide data in a file that shows no metadata. A photo straight
+from a camera fails it even after `inspect` comes back empty.
+
 ## Formats
 
 | Format | Status |
 |:--|:--|
 | PNG | ✅ supported |
-| JPEG | 🚧 next |
+| JPEG | ✅ baseline and extended (not progressive yet) |
 | Office documents, PDF, MP4 / HEIC, audio | 🗺️ planned |
 
 ## Limitations
 
-- Animated PNG (APNG) is refused for now.
+- Animated PNG (APNG) and progressive JPEG are refused for now.
 - ICC color profiles are removed, so wide-gamut images (e.g. Display P3
   screenshots) can look slightly different.
-- Color values viewers need (gamma, primaries; about 70 bytes) are
-  range-checked but kept as they are, and so are unused palette entries.
+- JPEG image data is re-encoded losslessly with the standard Huffman tables:
+  the pixels stay identical, but files that used optimized tables grow by
+  about 5-10%.
+- JPEG edge blocks that are partly outside the image keep their invisible
+  part, since changing it would mean re-compressing the visible pixels.
+- Values viewers need (PNG gamma and primaries, JPEG quantization tables
+  and density) are range-checked but kept as they are, and so are unused
+  PNG palette entries.
 - Data hidden in the pixel values themselves (steganography) is out of scope.
 - `-inplace` writes a new file. The old data may stay on disk until the space
   is reused.
