@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,7 +20,7 @@ import (
 )
 
 const usage = `Usage:
-  traceless inspect FILE...         list the metadata in each file
+  traceless inspect [-json] FILE... list the metadata in each file
   traceless strip [flags] FILE...   write a copy of each file without metadata
   traceless verify FILE...          check that files contain no metadata
 
@@ -78,8 +79,19 @@ func run(args []string) int {
 
 func runInspect(ctx context.Context, args []string) int {
 	fs := newFlagSet("inspect")
+	asJSON := fs.Bool("json", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() == 0 {
 		return usageError(err)
+	}
+	if *asJSON {
+		results, code := inspectAll(ctx, fs.Args())
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(results); err != nil {
+			return fail("stdout", err)
+		}
+		return code
 	}
 	code := exitOK
 	for _, path := range fs.Args() {
@@ -171,6 +183,39 @@ func runVerify(ctx context.Context, args []string) int {
 		fmt.Printf("%s (%s): clean\n", safe(path), h.Name())
 	}
 	return code
+}
+
+// inspectResult is the JSON output for one file. Fields is empty, never
+// null, when a file has no metadata or fails.
+type inspectResult struct {
+	File   string         `json:"file"`
+	Format string         `json:"format,omitempty"`
+	Fields []format.Field `json:"fields"`
+	Error  string         `json:"error,omitempty"`
+}
+
+// inspectAll inspects each path and returns the results and the exit code.
+func inspectAll(ctx context.Context, paths []string) ([]inspectResult, int) {
+	results := make([]inspectResult, 0, len(paths))
+	code := exitOK
+	for _, path := range paths {
+		if ctx.Err() != nil {
+			break
+		}
+		r := inspectResult{File: path, Fields: []format.Field{}}
+		h, fields, err := core.InspectFile(ctx, path)
+		if h != nil {
+			r.Format = h.Name()
+		}
+		if err != nil {
+			r.Error = err.Error()
+			code = exitFail
+		} else if fields != nil {
+			r.Fields = fields
+		}
+		results = append(results, r)
+	}
+	return results, code
 }
 
 func newFlagSet(name string) *flag.FlagSet {

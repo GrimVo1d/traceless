@@ -26,8 +26,8 @@ var (
 
 // Field is one piece of metadata found in a file.
 type Field struct {
-	Name  string
-	Value string
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // Handler inspects and strips metadata for one container format.

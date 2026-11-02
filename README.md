@@ -97,6 +97,7 @@ go build -o traceless ./cmd/traceless
 | Command | Does |
 |:--|:--|
 | `traceless inspect FILE...` | list the metadata in each file |
+| `traceless inspect -json FILE...` | the same, as JSON |
 | `traceless strip FILE...` | write `NAME.clean.EXT` next to each file |
 | `traceless strip -o OUT FILE` | choose the output path |
 | `traceless strip -inplace FILE...` | replace the originals |
