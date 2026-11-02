@@ -301,3 +301,41 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestOrientation(t *testing.T) {
+	be := binary.BigEndian
+	tests := []struct {
+		name string
+		data []byte
+		want int
+	}{
+		{"big-endian photo", exiftest.Photo(be), 6},
+		{"little-endian photo", exiftest.Photo(binary.LittleEndian), 6},
+		{"built", OrientationOnly(8), 8},
+		{"missing", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x010f, Value: "Google"}}}), 0},
+		{"out of range", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint16{9}}}}), 0},
+		{"wrong type", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint32{6}}}}), 0},
+		{"two values", exiftest.Build(be, &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint16{6, 6}}}}), 0},
+		{"only in IFD1", exiftest.Build(be, &exiftest.IFD{Next: &exiftest.IFD{Entries: []exiftest.Entry{{Tag: 0x0112, Value: []uint16{6}}}}}), 0},
+		{"truncated", exiftest.Photo(be)[:20], 0},
+		{"empty", nil, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Orientation(tt.data); got != tt.want {
+				t.Errorf("Orientation = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// The built block must decode to exactly one field.
+func TestOrientationOnly(t *testing.T) {
+	fields, err := Parse(OrientationOnly(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0] != (format.Field{Name: "EXIF Orientation", Value: "3"}) {
+		t.Errorf("Parse = %v", fields)
+	}
+}
