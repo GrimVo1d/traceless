@@ -59,37 +59,37 @@ func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
 	return h, h.Verify(br)
 }
 
-// StripFile writes a copy of src without metadata to dst. Output goes to a
-// temporary file next to dst, is verified, and only then moved into place,
-// so dst never holds partial or unverified output.
+// StripFile writes a copy of src without metadata to a new file dst, created
+// with mode 0600. It never overwrites an existing dst.
 //
-// If replace is false, StripFile never overwrites an existing dst. If replace
-// is true, dst may exist (dst == src strips in place), keeps its permission
-// bits, and must have no other hard links. New files are created with mode
-// 0600.
-//
+// Output goes to a temporary file next to dst, is verified, and only then
+// moved into place, so dst never holds partial or unverified output.
 // Cancelling ctx stops the strip and removes the temporary file.
-func StripFile(ctx context.Context, src, dst string, replace bool) (format.Handler, error) {
-	in, inInfo, err := openRegular(src)
+func StripFile(ctx context.Context, src, dst string) (format.Handler, error) {
+	return stripFile(ctx, src, dst, false)
+}
+
+// StripInPlace replaces path with a copy without metadata, the same way
+// StripFile writes a new file. The file keeps its permission bits and must
+// have no other hard links, which would keep the original data reachable.
+func StripInPlace(ctx context.Context, path string) (format.Handler, error) {
+	return stripFile(ctx, path, path, true)
+}
+
+func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handler, error) {
+	in, info, err := openRegular(src)
 	if err != nil {
 		return nil, err
 	}
 	defer in.Close()
 
 	perm := os.FileMode(0o600)
-	if replace {
-		// For an in-place strip, use the file we opened rather than looking
-		// the path up again.
-		info := inInfo
-		if src != dst {
-			info, err = os.Stat(dst)
+	if inPlace {
+		// Use the file we opened rather than looking the path up again.
+		if linkCount(info) > 1 {
+			return nil, fmt.Errorf("%s: %w", dst, ErrHardLinked)
 		}
-		if err == nil {
-			if linkCount(info) > 1 {
-				return nil, fmt.Errorf("%s: %w", dst, ErrHardLinked)
-			}
-			perm = info.Mode().Perm()
-		}
+		perm = info.Mode().Perm()
 	}
 
 	br := bufio.NewReader(ctxReader{ctx, in})
@@ -136,7 +136,7 @@ func StripFile(ctx context.Context, src, dst string, replace bool) (format.Handl
 		return h, err
 	}
 
-	if replace {
+	if inPlace {
 		if err := os.Rename(tmp.Name(), dst); err != nil {
 			return h, err
 		}
@@ -150,12 +150,15 @@ func StripFile(ctx context.Context, src, dst string, replace bool) (format.Handl
 	return h, err
 }
 
+// link is os.Link, replaced in tests.
+var link = os.Link
+
 // publish moves tmp to dst without ever replacing an existing dst. A hard
 // link fails atomically if dst exists; the caller then removes tmp.
 // Filesystems without hard links (FAT, exFAT) fall back to check-then-rename,
 // which can lose a race, and report renamed so tmp is left alone.
 func publish(tmp, dst string) (renamed bool, err error) {
-	err = os.Link(tmp, dst)
+	err = link(tmp, dst)
 	if errors.Is(err, fs.ErrExist) {
 		return false, fmt.Errorf("%s: %w", dst, fs.ErrExist)
 	}

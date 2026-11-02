@@ -15,6 +15,7 @@ import (
 	"unicode"
 
 	"traceless/internal/core"
+	"traceless/internal/format"
 )
 
 const usage = `Usage:
@@ -132,7 +133,13 @@ func runStrip(ctx context.Context, args []string) int {
 			ext := filepath.Ext(path)
 			dst = strings.TrimSuffix(path, ext) + ".clean" + ext
 		}
-		h, err := core.StripFile(ctx, src, dst, *inplace)
+		var h format.Handler
+		var err error
+		if *inplace {
+			h, err = core.StripInPlace(ctx, src)
+		} else {
+			h, err = core.StripFile(ctx, src, dst)
+		}
 		if err != nil {
 			code = fail(path, err)
 			continue
