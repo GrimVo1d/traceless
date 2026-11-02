@@ -14,12 +14,14 @@ import (
 	"path/filepath"
 
 	"traceless/internal/format"
+	"traceless/internal/format/jpeg"
 	"traceless/internal/format/png"
 )
 
 // handlers lists every supported format, tried in order during detection.
 var handlers = []format.Handler{
 	png.Handler{},
+	jpeg.Handler{},
 }
 
 // ErrHardLinked means an in-place strip was refused because other hard links
