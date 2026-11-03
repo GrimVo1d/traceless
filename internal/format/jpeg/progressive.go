@@ -1,5 +1,7 @@
 package jpeg
 
+import "traceless/internal/format"
+
 const (
 	// maxCoefBytes caps the coefficients held for images that can't be
 	// streamed: progressive ones and those split over several scans. At 128
@@ -17,9 +19,11 @@ const (
 )
 
 // coefs holds the quantized DCT coefficients of a whole image, in zigzag
-// order, while its scans are read.
+// order, while its scans are read. Its rows are held in budget.
 type coefs struct {
-	comps []coefGrid
+	comps  []coefGrid
+	budget *format.Budget
+	held   int64
 }
 
 // coefGrid holds the blocks of one component. Block rows are allocated when
@@ -35,7 +39,7 @@ type coefGrid struct {
 // newCoefs sizes the buffer for f. Interleaved scans also code the blocks
 // that pad the last MCU of each row and column, so with several components
 // the grids cover whole MCUs.
-func newCoefs(f *frame) (*coefs, error) {
+func newCoefs(f *frame, b *format.Budget) (*coefs, error) {
 	type size struct{ across, down int }
 	sizes := make([]size, len(f.comps))
 	total := 0
@@ -50,22 +54,44 @@ func newCoefs(f *frame) (*coefs, error) {
 	if total > maxCoefBytes/128 {
 		return nil, unsupported("image of %d blocks needs %d MB for its coefficients (limit %d MB)", total, total>>13, maxCoefBytes>>20)
 	}
-	cs := &coefs{comps: make([]coefGrid, len(f.comps))}
+	// The row and end slices of every block row.
+	var index int64
+	for _, s := range sizes {
+		index += 48 * int64(s.down)
+	}
+	if err := b.Hold(index); err != nil {
+		return nil, err
+	}
+	cs := &coefs{comps: make([]coefGrid, len(f.comps)), budget: b, held: index}
 	for i, s := range sizes {
 		cs.comps[i] = coefGrid{across: s.across, rows: make([][]int16, s.down), ends: make([][]uint8, s.down)}
 	}
 	return cs, nil
 }
 
-// block returns the coefficients of block (bx, by) and the end of its
-// nonzero AC coefficients, allocating its row.
-func (g *coefGrid) block(bx, by int) ([]int16, *uint8) {
+// block returns the coefficients of block (bx, by) of component ci and the
+// end of its nonzero AC coefficients, allocating its row.
+func (cs *coefs) block(ci, bx, by int) ([]int16, *uint8, error) {
+	g := &cs.comps[ci]
 	row := g.rows[by]
 	if row == nil {
+		// 64 int16 coefficients and an end per block, plus what the
+		// allocator rounds up (measured: under 144 per block).
+		n := int64(144 * g.across)
+		if err := cs.budget.Hold(n); err != nil {
+			return nil, nil, err
+		}
+		cs.held += n
 		row = make([]int16, 64*g.across)
 		g.rows[by], g.ends[by] = row, make([]uint8, g.across)
 	}
-	return row[64*bx : 64*bx+64 : 64*bx+64], &g.ends[by][bx]
+	return row[64*bx : 64*bx+64 : 64*bx+64], &g.ends[by][bx], nil
+}
+
+// release returns the memory held for the rows.
+func (cs *coefs) release() {
+	cs.budget.Release(cs.held)
+	cs.held = 0
 }
 
 // setEnd records that coefficient k of a block is nonzero.

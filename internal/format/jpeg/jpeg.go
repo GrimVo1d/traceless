@@ -43,8 +43,8 @@ func (Handler) Match(header []byte) bool {
 }
 
 // Inspect implements format.Handler.
-func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
-	p := &processor{mode: modeInspect, report: format.Report{Unit: "segments"}}
+func (Handler) Inspect(b *format.Budget, r io.Reader) ([]format.Field, error) {
+	p := &processor{mode: modeInspect, budget: b, report: format.Report{Unit: "segments"}}
 	if err := p.run(r); err != nil {
 		return nil, err
 	}
@@ -52,8 +52,8 @@ func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
 }
 
 // Strip implements format.Handler.
-func (Handler) Strip(r io.Reader, w io.Writer) error {
-	p := &processor{mode: modeStrip, out: bufio.NewWriter(w)}
+func (Handler) Strip(b *format.Budget, r io.Reader, w io.Writer) error {
+	p := &processor{mode: modeStrip, budget: b, out: bufio.NewWriter(w)}
 	if err := p.run(r); err != nil {
 		return err
 	}
@@ -65,9 +65,9 @@ func (Handler) Strip(r io.Reader, w io.Writer) error {
 // choices (Huffman tables and their symbol order, duplicate codes, header
 // bytes decoders skip) that can carry data through every check; only the
 // canonical form has none left.
-func (Handler) Verify(r io.Reader) error {
-	return format.VerifyFixedPoint(r, errNotStripped, func(in io.Reader, out io.Writer) error {
-		p := &processor{mode: modeVerify, out: bufio.NewWriter(out)}
+func (Handler) Verify(b *format.Budget, r io.Reader) error {
+	return format.VerifyFixedPoint(b, r, errNotStripped, func(in io.Reader, out io.Writer) error {
+		p := &processor{mode: modeVerify, budget: b, out: bufio.NewWriter(out)}
 		if err := p.run(in); err != nil {
 			return err
 		}
@@ -93,6 +93,7 @@ const (
 // it, Strip leaves it out of the output, Verify fails on it.
 type processor struct {
 	mode    mode
+	budget  *format.Budget
 	out     *bufio.Writer // rebuilt file, nil in modeInspect
 	mr      *markerReader
 	hdr     header
@@ -107,6 +108,11 @@ type processor struct {
 }
 
 func (p *processor) run(r io.Reader) error {
+	defer func() {
+		if p.coefs != nil {
+			p.coefs.release()
+		}
+	}()
 	mr, err := newMarkerReader(r)
 	if err != nil {
 		return err
@@ -292,7 +298,7 @@ func (p *processor) scan(data []byte) error {
 			// what it writes.
 			return errNotStripped
 		}
-		if p.coefs, err = newCoefs(hd.frame); err != nil {
+		if p.coefs, err = newCoefs(hd.frame, p.budget); err != nil {
 			return err
 		}
 	}
@@ -361,7 +367,10 @@ func (p *processor) buffer(sc scan) error {
 	var blk block
 	return p.decode(sc, func(ci, bx, by int, pred, eobrun *int32) error {
 		c := &hd.frame.comps[ci]
-		coef, end := p.coefs.comps[ci].block(bx, by)
+		coef, end, err := p.coefs.block(ci, bx, by)
+		if err != nil {
+			return err
+		}
 		dc, ac := hd.huff[0][c.td], hd.huff[1][c.ta]
 		switch {
 		case !hd.progressive:
@@ -401,6 +410,9 @@ func (p *processor) rebuild() error {
 	}
 	var blk block
 	err := f.blocks(all, nil, func(ci, bx, by int) error {
+		if err := p.budget.Work(1); err != nil {
+			return err
+		}
 		c := &f.comps[ci]
 		outside := bx >= c.bw || by >= c.bh
 		blk = block{}
@@ -449,6 +461,9 @@ func (p *processor) decode(sc scan, fn func(ci, bx, by int, pred, eobrun *int32)
 		return nil
 	}
 	err := hd.frame.blocks(sc.comps, restart, func(ci, bx, by int) error {
+		if err := p.budget.Work(1); err != nil {
+			return err
+		}
 		return fn(ci, bx, by, &preds[ci], &eobrun)
 	})
 	if err != nil {

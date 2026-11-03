@@ -40,15 +40,18 @@ type Handler interface {
 	Match(header []byte) bool
 
 	// Inspect lists the metadata found in r.
-	Inspect(r io.Reader) ([]Field, error)
+	Inspect(b *Budget, r io.Reader) ([]Field, error)
 
 	// Strip copies r to w without metadata. On error, w may hold partial
 	// output and must be discarded.
-	Strip(r io.Reader, w io.Writer) error
+	Strip(b *Budget, r io.Reader, w io.Writer) error
 
 	// Verify returns an error wrapping ErrMetadataRemains if r still holds
 	// metadata, or another error if r is not a valid file of this format.
-	Verify(r io.Reader) error
+	Verify(b *Budget, r io.Reader) error
+
+	// All three spend from b, which must not be nil, and return an error
+	// wrapping ErrLimit when it runs out.
 }
 
 // SniffLen is the number of leading bytes handlers get for detection.

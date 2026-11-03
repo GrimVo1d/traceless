@@ -2,6 +2,7 @@ package format
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -69,7 +70,7 @@ func TestVerifyFixedPoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := VerifyFixedPoint(strings.NewReader(tt.input), errTest, tt.rebuild)
+			err := VerifyFixedPoint(NewBudget(context.Background(), DefaultLimits), strings.NewReader(tt.input), errTest, tt.rebuild)
 			if !errors.Is(err, tt.want) {
 				t.Errorf("err = %v, want %v", err, tt.want)
 			}
@@ -80,7 +81,7 @@ func TestVerifyFixedPoint(t *testing.T) {
 // After the first difference, further reads fail, so a rebuild stops early.
 func TestVerifyFixedPointStopsEarly(t *testing.T) {
 	read := 0
-	err := VerifyFixedPoint(strings.NewReader(strings.Repeat("a", 1<<20)), errTest, func(in io.Reader, out io.Writer) error {
+	err := VerifyFixedPoint(NewBudget(context.Background(), DefaultLimits), strings.NewReader(strings.Repeat("a", 1<<20)), errTest, func(in io.Reader, out io.Writer) error {
 		buf := make([]byte, 100)
 		for {
 			n, err := in.Read(buf)
@@ -98,5 +99,39 @@ func TestVerifyFixedPointStopsEarly(t *testing.T) {
 	}
 	if read > 200 {
 		t.Errorf("read %d bytes after the first difference", read)
+	}
+}
+
+// The bytes kept while one side runs ahead are held in the budget.
+func TestVerifyFixedPointBudget(t *testing.T) {
+	b := NewBudget(context.Background(), Limits{Memory: 64 << 10})
+	err := VerifyFixedPoint(b, strings.NewReader(strings.Repeat("a", 1<<20)), errTest, func(in io.Reader, _ io.Writer) error {
+		_, err := io.Copy(io.Discard, in)
+		return err
+	})
+	if !errors.Is(err, ErrLimit) {
+		t.Errorf("err = %v, want ErrLimit", err)
+	}
+	if b.held != 0 {
+		t.Errorf("held %d bytes afterwards", b.held)
+	}
+}
+
+// A budget error stays: a rebuild that swallows it can't drop the input bytes
+// that went unrecorded and pass.
+func TestVerifyFixedPointBudgetSticky(t *testing.T) {
+	b := NewBudget(context.Background(), Limits{Memory: 4096})
+	input := strings.Repeat("a", 4096) + strings.Repeat("s", 4096)
+	err := VerifyFixedPoint(b, strings.NewReader(input), errTest, func(in io.Reader, out io.Writer) error {
+		head := make([]byte, 4096)
+		if _, err := io.ReadFull(in, head); err != nil {
+			return err
+		}
+		_, _ = in.Read(make([]byte, 4096)) // fails on the budget, ignored
+		_, err := out.Write(head)
+		return err
+	})
+	if !errors.Is(err, ErrLimit) {
+		t.Errorf("err = %v, want ErrLimit", err)
 	}
 }

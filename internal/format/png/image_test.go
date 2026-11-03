@@ -68,7 +68,7 @@ func TestStripPreservesPixels(t *testing.T) {
 		file = append(file, iendChunk...)
 
 		var out bytes.Buffer
-		if err := (Handler{}).Strip(bytes.NewReader(file), &out); err != nil {
+		if err := (Handler{}).Strip(budget(), bytes.NewReader(file), &out); err != nil {
 			t.Fatalf("image %d %+v: Strip: %v", i, h, err)
 		}
 		assertSamePixels(t, decode(t, out.Bytes()), decode(t, file))

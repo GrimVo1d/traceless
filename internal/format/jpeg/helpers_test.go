@@ -3,12 +3,14 @@ package jpeg
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/binary"
 	"image"
 	"image/color"
 	stdjpeg "image/jpeg"
 	"testing"
 
+	"traceless/internal/format"
 	"traceless/internal/format/exif/exiftest"
 )
 
@@ -211,4 +213,9 @@ func zeroData(sof []byte, restart int) []byte {
 	bw.flush()
 	w.Flush()
 	return buf.Bytes()
+}
+
+// budget returns a budget with the default limits for one handler call.
+func budget() *format.Budget {
+	return format.NewBudget(context.Background(), format.DefaultLimits)
 }

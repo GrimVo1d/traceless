@@ -14,6 +14,10 @@ import (
 // idatSize is the data size of the IDAT chunks Strip writes.
 const idatSize = 64 << 10
 
+// codecMemory is roughly what processImage needs besides its rows: the zlib
+// reader and writer and their buffers (measured: 1.3 MB).
+const codecMemory = 3 << 19
+
 // imageStats records what the pixel stream holds besides the pixels.
 type imageStats struct {
 	paddingRows int64     // rows with non-zero unused bits in their last byte
@@ -116,9 +120,27 @@ func (ir *idatReader) drain() (int64, error) {
 //
 // paletteLen is the number of PLTE entries for palette images.
 //
-// Memory use is a few rows, bounded by maxRowBytes.
-func processImage(h header, paletteLen int, ir *idatReader, w io.Writer) (imageStats, error) {
+// Memory use is a few rows, bounded by maxRowBytes, and held in b along with
+// the decompressed bytes.
+func processImage(b *format.Budget, h header, paletteLen int, ir *idatReader, w io.Writer) (imageStats, error) {
 	var stats imageStats
+	bits := h.bitsPerPixel()
+	full := rowBytes(h.width, bits)
+	// Palette indexes and sub-byte samples compress badly after filtering.
+	adaptive := h.colorType != colorPalette && h.depth >= 8
+	rows := int64(2) // raw, prevRaw
+	if w != nil {
+		rows += 3 // clean, prevClean, filtered[0]
+		if adaptive {
+			rows += 4
+		}
+	}
+	mem := rows*(1+full) + codecMemory
+	if err := b.Hold(mem); err != nil {
+		return stats, err
+	}
+	defer b.Release(mem)
+
 	zr, err := zlib.NewReader(ir)
 	if err != nil {
 		return stats, imageErr(err)
@@ -134,15 +156,11 @@ func processImage(h header, paletteLen int, ir *idatReader, w io.Writer) (imageS
 		bw = bufio.NewWriterSize(zw, 64<<10)
 	}
 
-	bits := h.bitsPerPixel()
 	off := h.filterOffset()
-	full := rowBytes(h.width, bits)
 	raw := make([]byte, 1+full)   // filter byte + row as stored
 	prevRaw := make([]byte, full) // previous row, unfiltered, as stored
 	var clean, prevClean []byte   // rows with unused bits zeroed
 	var filtered [5][]byte
-	// Palette indexes and sub-byte samples compress badly after filtering.
-	adaptive := h.colorType != colorPalette && h.depth >= 8
 	if zw != nil {
 		clean, prevClean = make([]byte, full), make([]byte, full)
 		filtered[0] = make([]byte, 1+full)
@@ -163,6 +181,14 @@ func processImage(h header, paletteLen int, ir *idatReader, w io.Writer) (imageS
 		clear(prevClean)
 		for range p.height {
 			row := raw[:1+n]
+			// A row costs some work whatever its size, so tall images are
+			// bounded by Work, wide ones by Inflate.
+			if err := b.Work(1); err != nil {
+				return stats, err
+			}
+			if err := b.Inflate(int64(1 + n)); err != nil {
+				return stats, err
+			}
 			if _, err := io.ReadFull(zr, row); err != nil {
 				return stats, imageErr(err)
 			}

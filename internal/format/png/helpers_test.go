@@ -3,6 +3,7 @@ package png
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"hash/crc32"
 	"image"
@@ -10,6 +11,7 @@ import (
 	stdpng "image/png"
 	"testing"
 
+	"traceless/internal/format"
 	"traceless/internal/format/exif/exiftest"
 )
 
@@ -181,4 +183,9 @@ func chunkData(b []byte, typ string) []byte {
 		i += 12 + n
 	}
 	return nil
+}
+
+// budget returns a budget with the default limits for one handler call.
+func budget() *format.Budget {
+	return format.NewBudget(context.Background(), format.DefaultLimits)
 }

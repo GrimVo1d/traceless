@@ -29,7 +29,7 @@ var update = flag.Bool("update", false, "rewrite testdata fixtures")
 func strip(t *testing.T, input []byte) []byte {
 	t.Helper()
 	var out bytes.Buffer
-	if err := (Handler{}).Strip(bytes.NewReader(input), &out); err != nil {
+	if err := (Handler{}).Strip(budget(), bytes.NewReader(input), &out); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 	return out.Bytes()
@@ -49,10 +49,10 @@ func decode(t *testing.T, b []byte) image.Image {
 func assertCleanCopy(t *testing.T, ref, out []byte) {
 	t.Helper()
 	var h Handler
-	if err := h.Verify(bytes.NewReader(out)); err != nil {
+	if err := h.Verify(budget(), bytes.NewReader(out)); err != nil {
 		t.Errorf("Verify(output): %v", err)
 	}
-	if fields, err := h.Inspect(bytes.NewReader(out)); err != nil || len(fields) != 0 {
+	if fields, err := h.Inspect(budget(), bytes.NewReader(out)); err != nil || len(fields) != 0 {
 		t.Errorf("Inspect(output) = %v, %v", fields, err)
 	}
 	assertSamePixels(t, decode(t, out), decode(t, ref))
@@ -102,7 +102,7 @@ func TestMatch(t *testing.T) {
 }
 
 func TestInspect(t *testing.T) {
-	fields, err := Handler{}.Inspect(bytes.NewReader(metadataJPEG(t)))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(metadataJPEG(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestInspectClean(t *testing.T) {
 		"restart interval": built{width: 16, height: 16, restart: 1}.bytes(),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fields, err := Handler{}.Inspect(bytes.NewReader(in))
+			fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 			if err != nil || len(fields) != 0 {
 				t.Errorf("Inspect = %v, %v", fields, err)
 			}
@@ -176,10 +176,10 @@ func TestVerifyRequiresCanonicalForm(t *testing.T) {
 	for name, in := range tests {
 		t.Run(name, func(t *testing.T) {
 			var h Handler
-			if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+			if fields, err := h.Inspect(budget(), bytes.NewReader(in)); err != nil || len(fields) != 0 {
 				t.Errorf("Inspect = %v, %v", fields, err)
 			}
-			if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 			assertCleanCopy(t, in, strip(t, in))
@@ -312,7 +312,7 @@ func TestOrientation(t *testing.T) {
 // A file that is just what Strip writes for a rotated photo is clean.
 func TestOrientationSegmentIsClean(t *testing.T) {
 	in := withSegments(baseJPEG(t), app(1, string(orientationSegment(8))))
-	if err := (Handler{}).Verify(bytes.NewReader(in)); err != nil {
+	if err := (Handler{}).Verify(budget(), bytes.NewReader(in)); err != nil {
 		t.Errorf("Verify: %v", err)
 	}
 	if out := strip(t, in); !bytes.Equal(out, in) {
@@ -363,14 +363,14 @@ func TestHiddenData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var h Handler
-			fields, err := h.Inspect(bytes.NewReader(tt.in))
+			fields, err := h.Inspect(budget(), bytes.NewReader(tt.in))
 			if err != nil {
 				t.Fatalf("Inspect: %v", err)
 			}
 			if !hasField(fields, tt.field, tt.value) {
 				t.Errorf("Inspect = %v, want %s: %s", fields, tt.field, tt.value)
 			}
-			if err := h.Verify(bytes.NewReader(tt.in)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(tt.in)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 			out := strip(t, tt.in)
@@ -400,10 +400,10 @@ func TestVerifyFindsMetadata(t *testing.T) {
 	for name, s := range segs {
 		t.Run(name, func(t *testing.T) {
 			in := withSegments(baseJPEG(t), s)
-			if err := (Handler{}).Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := (Handler{}).Verify(budget(), bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
-			fields, err := Handler{}.Inspect(bytes.NewReader(in))
+			fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 			if err != nil || len(fields) == 0 {
 				t.Errorf("Inspect = %v, %v", fields, err)
 			}
@@ -494,15 +494,15 @@ func TestRejectsInvalidInput(t *testing.T) {
 	check := func(t *testing.T, in []byte, want error) {
 		t.Helper()
 		var h Handler
-		if _, err := h.Inspect(bytes.NewReader(in)); !errors.Is(err, want) {
+		if _, err := h.Inspect(budget(), bytes.NewReader(in)); !errors.Is(err, want) {
 			t.Errorf("Inspect = %v, want %v", err, want)
 		}
 		// Verify stops at the first scan Strip wouldn't write, which can
 		// come before the broken part.
-		if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, want) && !errors.Is(err, format.ErrMetadataRemains) {
+		if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, want) && !errors.Is(err, format.ErrMetadataRemains) {
 			t.Errorf("Verify = %v, want %v", err, want)
 		}
-		if err := h.Strip(bytes.NewReader(in), io.Discard); !errors.Is(err, want) {
+		if err := h.Strip(budget(), bytes.NewReader(in), io.Discard); !errors.Is(err, want) {
 			t.Errorf("Strip = %v, want %v", err, want)
 		}
 	}
@@ -534,11 +534,11 @@ func TestReadErrors(t *testing.T) {
 	in := metadataJPEG(t)
 	for _, n := range []int{1, 10, 200, len(in) / 2, len(in) - 1} {
 		var h Handler
-		_, err := h.Inspect(&failingReader{in[:n], context.Canceled})
+		_, err := h.Inspect(budget(), &failingReader{in[:n], context.Canceled})
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Inspect after %d bytes = %v, want context.Canceled", n, err)
 		}
-		err = h.Strip(&failingReader{in[:n], context.Canceled}, io.Discard)
+		err = h.Strip(budget(), &failingReader{in[:n], context.Canceled}, io.Discard)
 		if !errors.Is(err, context.Canceled) {
 			t.Errorf("Strip after %d bytes = %v, want context.Canceled", n, err)
 		}
@@ -558,7 +558,7 @@ func TestCheapBlocks(t *testing.T) {
 
 	start := time.Now()
 	var out bytes.Buffer
-	if err := (Handler{}).Strip(bytes.NewReader(in), &out); err != nil {
+	if err := (Handler{}).Strip(budget(), bytes.NewReader(in), &out); err != nil {
 		t.Fatal(err)
 	}
 	if d := time.Since(start); d > 5*time.Second {
@@ -581,7 +581,7 @@ func TestInspectLimits(t *testing.T) {
 		segs = append(segs, seg(markerCOM, []byte(fmt.Sprint(i))))
 	}
 	segs = append(segs, app(1, prefixXMP, strings.Repeat("\xe9", 60000)))
-	fields, err := Handler{}.Inspect(bytes.NewReader(withSegments(baseJPEG(t), segs...)))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(withSegments(baseJPEG(t), segs...)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,7 +593,7 @@ func TestInspectLimits(t *testing.T) {
 	}
 
 	in := withSegments(baseJPEG(t), app(1, prefixXMP, strings.Repeat("\xe9", 60000)))
-	fields, err = Handler{}.Inspect(bytes.NewReader(in))
+	fields, err = Handler{}.Inspect(budget(), bytes.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +617,7 @@ func TestText(t *testing.T) {
 // Only the first EXIF segment is decoded; repeats are grouped by size.
 func TestInspectDecodesOneEXIF(t *testing.T) {
 	e := app(1, prefixEXIF, string(exiftest.Photo(binary.BigEndian)))
-	fields, err := Handler{}.Inspect(bytes.NewReader(withSegments(baseJPEG(t), e, e, e)))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(withSegments(baseJPEG(t), e, e, e)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -647,7 +647,7 @@ func TestVerifyLargeImage(t *testing.T) {
 	if len(out) <= 4<<20 { // format.maxLag
 		t.Fatalf("stripped file has only %d bytes", len(out))
 	}
-	if err := (Handler{}).Verify(bytes.NewReader(out)); err != nil {
+	if err := (Handler{}).Verify(budget(), bytes.NewReader(out)); err != nil {
 		t.Errorf("Verify: %v", err)
 	}
 }
@@ -668,5 +668,56 @@ func TestFixture(t *testing.T) {
 	}
 	if !bytes.Equal(data, metadataJPEG(t)) {
 		t.Error("fixture is out of date (run go test -run TestFixture -update)")
+	}
+}
+
+// Each method spends from its budget and stops with ErrLimit when it runs
+// out, and gives back the memory it held once done.
+func TestBudget(t *testing.T) {
+	limited := func(l format.Limits) *format.Budget { return format.NewBudget(context.Background(), l) }
+	base, prog := readScans(t, "base.jpg"), readScans(t, "prog.jpg")
+	tests := []struct {
+		name   string
+		input  []byte
+		limits format.Limits
+	}{
+		{"blocks of a streamed scan", base, format.Limits{Memory: 1 << 30, Decompressed: 1 << 30, Work: 5}},
+		{"blocks of buffered scans", prog, format.Limits{Memory: 1 << 30, Decompressed: 1 << 30, Work: 50}},
+		{"coefficients", prog, format.Limits{Memory: 1000, Decompressed: 1 << 30, Work: 1 << 30}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h Handler
+			if _, err := h.Inspect(limited(tt.limits), bytes.NewReader(tt.input)); !errors.Is(err, format.ErrLimit) {
+				t.Errorf("Inspect = %v, want ErrLimit", err)
+			}
+			if err := h.Strip(limited(tt.limits), bytes.NewReader(tt.input), io.Discard); !errors.Is(err, format.ErrLimit) {
+				t.Errorf("Strip = %v, want ErrLimit", err)
+			}
+		})
+	}
+
+	// One budget that fits one call at a time fits many calls in a row.
+	b := limited(format.Limits{Memory: 64 << 10, Decompressed: 1 << 30, Work: 1 << 30})
+	for i := range 3 {
+		var h Handler
+		if err := h.Strip(b, bytes.NewReader(prog), io.Discard); err != nil {
+			t.Fatalf("Strip %d: %v", i, err)
+		}
+	}
+}
+
+// A canceled call stops in the image data even when its reader doesn't check
+// the context.
+func TestBudgetCanceled(t *testing.T) {
+	var buf bytes.Buffer
+	if err := stdjpeg.Encode(&buf, image.NewGray(image.Rect(0, 0, 2100, 2100)), nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := Handler{}.Strip(format.NewBudget(ctx, format.DefaultLimits), bytes.NewReader(buf.Bytes()), io.Discard)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Strip = %v, want context.Canceled", err)
 	}
 }

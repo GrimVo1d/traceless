@@ -28,22 +28,22 @@ func FuzzHandler(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var h Handler
-		h.Inspect(bytes.NewReader(data))
-		h.Verify(bytes.NewReader(data))
+		h.Inspect(budget(), bytes.NewReader(data))
+		h.Verify(budget(), bytes.NewReader(data))
 
 		var out bytes.Buffer
-		if err := h.Strip(bytes.NewReader(data), &out); err != nil {
+		if err := h.Strip(budget(), bytes.NewReader(data), &out); err != nil {
 			return
 		}
-		if err := h.Verify(bytes.NewReader(out.Bytes())); err != nil {
+		if err := h.Verify(budget(), bytes.NewReader(out.Bytes())); err != nil {
 			t.Fatalf("stripped output fails Verify: %v", err)
 		}
-		fields, err := h.Inspect(bytes.NewReader(out.Bytes()))
+		fields, err := h.Inspect(budget(), bytes.NewReader(out.Bytes()))
 		if err != nil || len(fields) != 0 {
 			t.Fatalf("stripped output: Inspect = %v, %v", fields, err)
 		}
 		var again bytes.Buffer
-		if err := h.Strip(bytes.NewReader(out.Bytes()), &again); err != nil {
+		if err := h.Strip(budget(), bytes.NewReader(out.Bytes()), &again); err != nil {
 			t.Fatalf("stripping the output again: %v", err)
 		}
 		if !bytes.Equal(out.Bytes(), again.Bytes()) {

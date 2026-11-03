@@ -41,7 +41,7 @@ func InspectFile(ctx context.Context, path string) (format.Handler, []format.Fie
 	if err != nil {
 		return nil, nil, err
 	}
-	fields, err := h.Inspect(br)
+	fields, err := h.Inspect(format.NewBudget(ctx, format.DefaultLimits), br)
 	return h, fields, err
 }
 
@@ -58,7 +58,7 @@ func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h, h.Verify(br)
+	return h, h.Verify(format.NewBudget(ctx, format.DefaultLimits), br)
 }
 
 // StripFile writes a copy of src without metadata to a new file dst, created
@@ -113,7 +113,9 @@ func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handl
 	}()
 
 	bw := bufio.NewWriter(ctxWriter{ctx, tmp})
-	if err := h.Strip(br, bw); err != nil {
+	// Strip and the check of its output get a budget each: a file that
+	// strips within the limits also verifies within them.
+	if err := h.Strip(format.NewBudget(ctx, format.DefaultLimits), br, bw); err != nil {
 		return h, err
 	}
 	if err := bw.Flush(); err != nil {
@@ -122,7 +124,7 @@ func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handl
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return h, err
 	}
-	if err := h.Verify(bufio.NewReader(ctxReader{ctx, tmp})); err != nil {
+	if err := h.Verify(format.NewBudget(ctx, format.DefaultLimits), bufio.NewReader(ctxReader{ctx, tmp})); err != nil {
 		return h, fmt.Errorf("verifying output: %w", err)
 	}
 	if err := tmp.Chmod(perm); err != nil {

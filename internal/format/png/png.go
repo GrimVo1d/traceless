@@ -49,8 +49,8 @@ func (Handler) Match(header []byte) bool {
 }
 
 // Inspect implements format.Handler.
-func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
-	p := &processor{mode: modeInspect, report: format.Report{Unit: "chunks"}}
+func (Handler) Inspect(b *format.Budget, r io.Reader) ([]format.Field, error) {
+	p := &processor{mode: modeInspect, budget: b, report: format.Report{Unit: "chunks"}}
 	if err := p.run(r); err != nil {
 		return nil, err
 	}
@@ -58,8 +58,8 @@ func (Handler) Inspect(r io.Reader) ([]format.Field, error) {
 }
 
 // Strip implements format.Handler.
-func (Handler) Strip(r io.Reader, w io.Writer) error {
-	p := &processor{mode: modeStrip, w: w}
+func (Handler) Strip(b *format.Budget, r io.Reader, w io.Writer) error {
+	p := &processor{mode: modeStrip, budget: b, w: w}
 	return p.run(r)
 }
 
@@ -69,10 +69,10 @@ var errNotStripped = fmt.Errorf("png: %w: chunk layout or image compression diff
 
 // Verify implements format.Handler. It rebuilds the file as Strip would and
 // fails unless the result is byte-identical to the input.
-func (Handler) Verify(r io.Reader) error {
-	return format.VerifyFixedPoint(r, errNotStripped, func(in io.Reader, out io.Writer) error {
+func (Handler) Verify(b *format.Budget, r io.Reader) error {
+	return format.VerifyFixedPoint(b, r, errNotStripped, func(in io.Reader, out io.Writer) error {
 		bw := bufio.NewWriter(out)
-		p := &processor{mode: modeVerify, w: bw}
+		p := &processor{mode: modeVerify, budget: b, w: bw}
 		if err := p.run(in); err != nil {
 			return err
 		}
@@ -93,7 +93,9 @@ const (
 // it, Strip leaves it out of the output, Verify fails on it.
 type processor struct {
 	mode        mode
-	w           io.Writer // output, nil in modeInspect
+	budget      *format.Budget
+	text        *textDecoder // for Inspect, once needed
+	w           io.Writer    // output, nil in modeInspect
 	cr          *chunkReader
 	layout      layout
 	report      format.Report
@@ -116,19 +118,26 @@ const maxHeld = 64 << 20
 // back until the pixels show which palette entries are used, since PLTE must
 // come first; Verify writes it through. Both apply the same cap.
 type heldWriter struct {
-	w   io.Writer     // where it goes
-	buf *bytes.Buffer // the output held back, nil to write through
-	n   int           // bytes written
+	w   io.Writer      // where it goes
+	buf *format.Buffer // the output held back, nil to write through
+	n   int            // bytes written
 }
 
 func (hw *heldWriter) Write(b []byte) (int, error) {
 	if hw.n += len(b); hw.n > maxHeld {
 		return 0, unsupported("palette image data over %d MB", maxHeld>>20)
 	}
-	if hw.buf != nil {
-		return hw.buf.Write(b)
+	if hw.buf == nil {
+		return hw.w.Write(b)
 	}
-	return hw.w.Write(b)
+	return hw.buf.Write(b)
+}
+
+// release returns the memory held for the buffer.
+func (hw *heldWriter) release() {
+	if hw.buf != nil {
+		hw.buf.Release()
+	}
 }
 
 type pendingChunk struct {
@@ -266,11 +275,12 @@ func (p *processor) image() error {
 	}
 	palette := l.hdr.colorType == colorPalette
 	if palette && p.w != nil {
-		p.held = &heldWriter{w: p.w}
+		hw := &heldWriter{w: p.w}
 		if p.mode == modeStrip {
-			p.held.buf = new(bytes.Buffer)
+			hw.buf = format.NewBuffer(p.budget)
 		}
-		p.w = p.held
+		defer hw.release()
+		p.held, p.w = hw, hw
 	}
 	if p.orientation != 0 {
 		if err := p.write(func() error { return writeChunk(p.w, "eXIf", orientationChunk(p.orientation)) }); err != nil {
@@ -280,7 +290,7 @@ func (p *processor) image() error {
 	l.sawImage = true
 
 	ir := newIDATReader(p.cr)
-	stats, err := processImage(l.hdr, l.paletteLen, ir, p.w)
+	stats, err := processImage(p.budget, l.hdr, l.paletteLen, ir, p.w)
 	if err != nil {
 		return err
 	}
@@ -492,7 +502,15 @@ func (p *processor) drop(h chunkHeader) error {
 	case modeVerify:
 		return fmt.Errorf("png: %w: %s chunk", format.ErrMetadataRemains, h.Type)
 	case modeInspect:
-		f, grouped, err := describe(h, p.cr.Data())
+		if p.report.Full() {
+			// It would only be counted, so don't decode it.
+			p.report.Add(format.Field{Name: h.Type + " chunk"}, true, int64(h.Length))
+			return nil
+		}
+		if p.text == nil {
+			p.text = &textDecoder{budget: p.budget}
+		}
+		f, grouped, err := p.text.describe(h, p.cr.Data())
 		if err != nil {
 			return err
 		}

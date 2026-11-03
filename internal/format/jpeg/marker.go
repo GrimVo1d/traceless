@@ -139,7 +139,10 @@ func (mr *markerReader) segment(m byte) ([]byte, error) {
 // trailing counts the bytes after EOI and reports whether they start like
 // another JPEG file, which phones append for depth maps and motion photos.
 func (mr *markerReader) trailing() (n int64, image bool, err error) {
-	head, _ := mr.r.Peek(3)
+	head, err := mr.r.Peek(3)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return 0, false, err
+	}
 	image = string(head) == "\xff\xd8\xff"
 	n, err = io.Copy(io.Discard, mr.r)
 	return n, image, err

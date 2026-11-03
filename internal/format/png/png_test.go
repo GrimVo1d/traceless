@@ -37,7 +37,7 @@ func fieldMap(fields []format.Field) map[string]string {
 func strip(t *testing.T, input []byte) []byte {
 	t.Helper()
 	var out bytes.Buffer
-	if err := (Handler{}).Strip(bytes.NewReader(input), &out); err != nil {
+	if err := (Handler{}).Strip(budget(), bytes.NewReader(input), &out); err != nil {
 		t.Fatalf("Strip: %v", err)
 	}
 	return out.Bytes()
@@ -57,10 +57,10 @@ func decode(t *testing.T, b []byte) image.Image {
 func assertCleanCopy(t *testing.T, ref, out []byte) {
 	t.Helper()
 	var h Handler
-	if err := h.Verify(bytes.NewReader(out)); err != nil {
+	if err := h.Verify(budget(), bytes.NewReader(out)); err != nil {
 		t.Errorf("Verify(output): %v", err)
 	}
-	if fields, err := h.Inspect(bytes.NewReader(out)); err != nil || len(fields) != 0 {
+	if fields, err := h.Inspect(budget(), bytes.NewReader(out)); err != nil || len(fields) != 0 {
 		t.Errorf("Inspect(output) = %v, %v", fields, err)
 	}
 	assertSamePixels(t, decode(t, out), decode(t, ref))
@@ -83,7 +83,7 @@ func TestMatch(t *testing.T) {
 }
 
 func TestInspect(t *testing.T) {
-	fields, err := Handler{}.Inspect(bytes.NewReader(metadataPNG(t)))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(metadataPNG(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestInspectDecodesOneEXIF(t *testing.T) {
 	ihdr, idat := plainChunks()
 	exifChunk := encodeChunk("eXIf", exiftest.Photo(binary.BigEndian))
 	in := pngOf(ihdr, exifChunk, exifChunk, exifChunk, idat, iendChunk)
-	fields, err := Handler{}.Inspect(bytes.NewReader(in))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestInspectDecodesOneEXIF(t *testing.T) {
 func TestInspectMalformedEXIF(t *testing.T) {
 	ihdr, idat := plainChunks()
 	in := pngOf(ihdr, encodeChunk("eXIf", []byte("MM\x00*\x00\x00\xff\xff")), idat, iendChunk)
-	fields, err := Handler{}.Inspect(bytes.NewReader(in))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestInspectClean(t *testing.T) {
 		"palette":    palettePNG(),
 		"interlaced": interlacedPNG(),
 	} {
-		fields, err := Handler{}.Inspect(bytes.NewReader(input))
+		fields, err := Handler{}.Inspect(budget(), bytes.NewReader(input))
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -260,10 +260,10 @@ func TestVerifyRequiresCanonicalForm(t *testing.T) {
 	var h Handler
 	for name, in := range tests {
 		t.Run(name, func(t *testing.T) {
-			if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+			if fields, err := h.Inspect(budget(), bytes.NewReader(in)); err != nil || len(fields) != 0 {
 				t.Errorf("Inspect = %v, %v; want no fields", fields, err)
 			}
-			if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 			assertCleanCopy(t, in, strip(t, in))
@@ -480,14 +480,14 @@ func TestHiddenData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var h Handler
-			fields, err := h.Inspect(bytes.NewReader(tt.input))
+			fields, err := h.Inspect(budget(), bytes.NewReader(tt.input))
 			if err != nil {
 				t.Fatalf("Inspect: %v", err)
 			}
 			if _, ok := fieldMap(fields)[tt.field]; !ok {
 				t.Errorf("Inspect = %v, want a %q field", fields, tt.field)
 			}
-			if err := h.Verify(bytes.NewReader(tt.input)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(tt.input)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 			out := strip(t, tt.input)
@@ -511,7 +511,7 @@ func TestVerifyFindsMetadata(t *testing.T) {
 	}
 	for name, input := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := Handler{}.Verify(bytes.NewReader(input))
+			err := Handler{}.Verify(budget(), bytes.NewReader(input))
 			if !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
@@ -566,17 +566,17 @@ func TestRejectsInvalidInput(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var h Handler
-			if _, err := h.Inspect(bytes.NewReader(tt.input)); !errors.Is(err, tt.want) {
+			if _, err := h.Inspect(budget(), bytes.NewReader(tt.input)); !errors.Is(err, tt.want) {
 				t.Errorf("Inspect = %v, want %v", err, tt.want)
 			}
-			if err := h.Strip(bytes.NewReader(tt.input), &bytes.Buffer{}); !errors.Is(err, tt.want) {
+			if err := h.Strip(budget(), bytes.NewReader(tt.input), &bytes.Buffer{}); !errors.Is(err, tt.want) {
 				t.Errorf("Strip = %v, want %v", err, tt.want)
 			}
 			wantVerify := tt.want
 			if tt.wantVerify != nil {
 				wantVerify = tt.wantVerify
 			}
-			if err := h.Verify(bytes.NewReader(tt.input)); !errors.Is(err, wantVerify) {
+			if err := h.Verify(budget(), bytes.NewReader(tt.input)); !errors.Is(err, wantVerify) {
 				t.Errorf("Verify = %v, want %v", err, wantVerify)
 			}
 		})
@@ -605,11 +605,11 @@ func TestReadErrors(t *testing.T) {
 	in := metadataPNG(t)
 	for n := range in {
 		var h Handler
-		err := h.Verify(&failingReader{bytes.NewReader(in), n, context.Canceled})
+		err := h.Verify(budget(), &failingReader{bytes.NewReader(in), n, context.Canceled})
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, format.ErrMetadataRemains) {
 			t.Fatalf("error after %d bytes: Verify = %v, want context.Canceled", n, err)
 		}
-		err = h.Strip(&failingReader{bytes.NewReader(in), n, context.Canceled}, io.Discard)
+		err = h.Strip(budget(), &failingReader{bytes.NewReader(in), n, context.Canceled}, io.Discard)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("error after %d bytes: Strip = %v, want context.Canceled", n, err)
 		}
@@ -619,7 +619,7 @@ func TestReadErrors(t *testing.T) {
 // A small zTXt chunk must not expand into a huge value during Inspect.
 func TestInspectLimitsDecompression(t *testing.T) {
 	bomb := join([]byte("Comment\x00\x00"), deflate(make([]byte, 50<<20)))
-	fields, err := Handler{}.Inspect(bytes.NewReader(withChunks(basePNG(t), encodeChunk("zTXt", bomb))))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(withChunks(basePNG(t), encodeChunk("zTXt", bomb))))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +641,7 @@ func TestInspectLimitsFields(t *testing.T) {
 		key := fmt.Sprintf("key%d\x00value", i)
 		many = append(many, encodeChunk("tEXt", []byte(key))...)
 	}
-	fields, err := Handler{}.Inspect(bytes.NewReader(withChunks(basePNG(t), many)))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(withChunks(basePNG(t), many)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +660,7 @@ func TestInspectLimitsFields(t *testing.T) {
 func TestInspectClipsNames(t *testing.T) {
 	key := strings.Repeat("\xe9", 100000)
 	in := withChunks(basePNG(t), encodeChunk("tEXt", []byte(key+"\x00value")))
-	fields, err := Handler{}.Inspect(bytes.NewReader(in))
+	fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +697,7 @@ func TestVerifyLargeImage(t *testing.T) {
 	if len(out) <= 4<<20 { // format.maxLag
 		t.Fatalf("stripped file has only %d bytes", len(out))
 	}
-	if err := (Handler{}).Verify(bytes.NewReader(out)); err != nil {
+	if err := (Handler{}).Verify(budget(), bytes.NewReader(out)); err != nil {
 		t.Errorf("Verify: %v", err)
 	}
 }
@@ -784,11 +784,11 @@ func TestCanonicalPalette(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var h Handler
-			fields, err := h.Inspect(bytes.NewReader(tt.input))
+			fields, err := h.Inspect(budget(), bytes.NewReader(tt.input))
 			if got := fieldMap(fields); err != nil || !maps.Equal(got, tt.fields) {
 				t.Errorf("Inspect = %v, %v; want %v", got, err, tt.fields)
 			}
-			if err := h.Verify(bytes.NewReader(tt.input)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(tt.input)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 			out := strip(t, tt.input)
@@ -809,11 +809,72 @@ func TestVerifyPaletteChunkOrder(t *testing.T) {
 		encodeChunk("bKGD", []byte{1}), encodeChunk("tRNS", []byte{128}),
 		encodeChunk("IDAT", deflate([]byte{0, 0, 1})), iendChunk)
 	var h Handler
-	if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+	if fields, err := h.Inspect(budget(), bytes.NewReader(in)); err != nil || len(fields) != 0 {
 		t.Errorf("Inspect = %v, %v; want nothing", fields, err)
 	}
-	if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+	if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
 		t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 	}
 	assertCleanCopy(t, in, strip(t, in))
+}
+
+// Each method spends from its budget and stops with ErrLimit when it runs
+// out, and gives back the memory it held once done.
+func TestBudget(t *testing.T) {
+	noise := noisePNG(t, 64, 48)
+	limited := func(l format.Limits) *format.Budget { return format.NewBudget(context.Background(), l) }
+	tests := []struct {
+		name   string
+		input  []byte
+		limits format.Limits
+	}{
+		{"decompressed", noise, format.Limits{Memory: 4 << 20, Decompressed: 1000, Work: 1 << 30}},
+		{"row buffers", noise, format.Limits{Memory: 1000, Decompressed: 1 << 30, Work: 1 << 30}},
+		// Its rows take 5 x 3 bytes, the held output a few dozen.
+		{"held palette output", palettePNG(), format.Limits{Memory: codecMemory + 20, Decompressed: 1 << 30, Work: 1 << 30}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h Handler
+			if err := h.Strip(limited(tt.limits), bytes.NewReader(tt.input), io.Discard); !errors.Is(err, format.ErrLimit) {
+				t.Errorf("Strip = %v, want ErrLimit", err)
+			}
+		})
+	}
+
+	// Rows cost work whatever their size.
+	var tall []byte
+	for range 100_000 {
+		tall = append(tall, 0, 0)
+	}
+	tallPNG := pngOf(ihdrChunk(1, 100_000, 8, colorGray, 0), encodeChunk("IDAT", deflate(tall)), iendChunk)
+	if _, err := (Handler{}).Inspect(limited(format.Limits{Memory: 4 << 20, Decompressed: 1 << 30, Work: 1000}), bytes.NewReader(tallPNG)); !errors.Is(err, format.ErrLimit) {
+		t.Errorf("Inspect of a tall image = %v, want ErrLimit", err)
+	}
+
+	// Text is decoded only while the report has room, so many compressed
+	// text chunks cost what the report shows.
+	text := append([]byte{}, basePNG(t)[:ihdrEnd]...)
+	ztxt := encodeChunk("zTXt", append([]byte("k\x00\x00"), deflate(bytes.Repeat([]byte("A"), 8192))...))
+	for range 2000 {
+		text = append(text, ztxt...)
+	}
+	_, idat := plainChunks()
+	text = append(append(text, idat...), iendChunk...)
+	fields, err := (Handler{}).Inspect(limited(format.Limits{Memory: 4 << 20, Decompressed: 2 << 20, Work: 1 << 30}), bytes.NewReader(text))
+	if err != nil || fieldMap(fields)["More metadata"] == "" {
+		t.Errorf("Inspect of 2000 zTXt chunks = %d fields, %v; want a capped report", len(fields), err)
+	}
+
+	// One budget that fits one call at a time fits many calls in a row.
+	b := limited(format.Limits{Memory: 2 << 20, Decompressed: 1 << 30, Work: 1 << 30})
+	for i := range 3 {
+		var h Handler
+		if err := h.Strip(b, bytes.NewReader(palettePNG()), io.Discard); err != nil {
+			t.Fatalf("Strip %d: %v", i, err)
+		}
+		if _, err := h.Inspect(b, bytes.NewReader(noise)); err != nil {
+			t.Fatalf("Inspect %d: %v", i, err)
+		}
+	}
 }

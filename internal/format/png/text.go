@@ -24,15 +24,33 @@ const (
 	maxNameLen = 128
 )
 
+// textDecoder decodes the chunks Inspect shows as text, spending from
+// budget. It reuses one zlib reader for all of them.
+type textDecoder struct {
+	budget *format.Budget
+	zr     io.ReadCloser
+}
+
 // describe turns a dropped chunk into a human-readable field. Generic chunks
 // carry no readable value and can be grouped by type.
-func describe(h chunkHeader, data io.Reader) (f format.Field, grouped bool, err error) {
+func (td *textDecoder) describe(h chunkHeader, data io.Reader) (f format.Field, grouped bool, err error) {
 	switch h.Type {
 	case "tEXt", "zTXt", "iTXt", "tIME", "iCCP":
 	default:
 		return format.Field{Name: h.Type + " chunk", Value: fmt.Sprintf("%d bytes", h.Length)}, true, nil
 	}
 
+	n := min(int64(h.Length), maxChunkRead)
+	if err := td.budget.Hold(n); err != nil {
+		return format.Field{}, false, err
+	}
+	defer td.budget.Release(n)
+	if h.Type == "zTXt" || h.Type == "iTXt" {
+		// What inflate may decompress, charged before it runs.
+		if err := td.budget.Inflate(maxValueLen + 1); err != nil {
+			return format.Field{}, false, err
+		}
+	}
 	b, err := io.ReadAll(io.LimitReader(data, maxChunkRead))
 	if err != nil {
 		return format.Field{}, false, err
@@ -44,9 +62,9 @@ func describe(h chunkHeader, data io.Reader) (f format.Field, grouped bool, err 
 	case "tEXt":
 		name, value, ok = parseText(b)
 	case "zTXt":
-		name, value, ok = parseZText(b)
+		name, value, ok = td.parseZText(b)
 	case "iTXt":
-		name, value, ok = parseIText(b)
+		name, value, ok = td.parseIText(b)
 	case "tIME":
 		name, value, ok = parseTime(b)
 	case "iCCP":
@@ -88,12 +106,12 @@ func parseText(b []byte) (name, value string, ok bool) {
 }
 
 // parseZText decodes a zTXt chunk: keyword, NUL, method, zlib Latin-1 text.
-func parseZText(b []byte) (name, value string, ok bool) {
+func (td *textDecoder) parseZText(b []byte) (name, value string, ok bool) {
 	key, rest, ok := bytes.Cut(b, []byte{0})
 	if !ok || len(rest) < 1 || rest[0] != 0 {
 		return "", "", false
 	}
-	text, err := inflate(rest[1:])
+	text, err := td.inflate(rest[1:])
 	if err != nil {
 		return "", "", false
 	}
@@ -102,7 +120,7 @@ func parseZText(b []byte) (name, value string, ok bool) {
 
 // parseIText decodes an iTXt chunk: keyword, NUL, compression flag, method,
 // language tag, NUL, translated keyword, NUL, UTF-8 text (zlib if flagged).
-func parseIText(b []byte) (name, value string, ok bool) {
+func (td *textDecoder) parseIText(b []byte) (name, value string, ok bool) {
 	key, rest, ok := bytes.Cut(b, []byte{0})
 	if !ok || len(rest) < 2 {
 		return "", "", false
@@ -121,7 +139,7 @@ func parseIText(b []byte) (name, value string, ok bool) {
 			return "", "", false
 		}
 		var err error
-		if text, err = inflate(text); err != nil {
+		if text, err = td.inflate(text); err != nil {
 			return "", "", false
 		}
 	}
@@ -129,7 +147,7 @@ func parseIText(b []byte) (name, value string, ok bool) {
 	if len(lang) > 0 {
 		name += " [" + latin1(lang) + "]"
 	}
-	return name, string(text), true
+	return name, string(text[:min(len(text), maxValueLen+1)]), true
 }
 
 // parseTime decodes a tIME chunk: the last modification time.
@@ -152,17 +170,23 @@ func parseICCP(b []byte, size uint32) (name, value string, ok bool) {
 }
 
 // inflate decompresses zlib data, stopping just past maxValueLen bytes.
-func inflate(b []byte) ([]byte, error) {
-	zr, err := zlib.NewReader(bytes.NewReader(b))
-	if err != nil {
+func (td *textDecoder) inflate(b []byte) ([]byte, error) {
+	if td.zr == nil {
+		zr, err := zlib.NewReader(bytes.NewReader(b))
+		if err != nil {
+			return nil, err
+		}
+		td.zr = zr
+	} else if err := td.zr.(zlib.Resetter).Reset(bytes.NewReader(b), nil); err != nil {
 		return nil, err
 	}
-	defer zr.Close()
-	return io.ReadAll(io.LimitReader(zr, maxValueLen+1))
+	return io.ReadAll(io.LimitReader(td.zr, maxValueLen+1))
 }
 
-// latin1 converts ISO 8859-1 bytes to a UTF-8 string.
+// latin1 converts ISO 8859-1 bytes to a UTF-8 string. It converts at most
+// maxValueLen + 1 bytes: clip cuts anything longer anyway.
 func latin1(b []byte) string {
+	b = b[:min(len(b), maxValueLen+1)]
 	var sb strings.Builder
 	sb.Grow(len(b))
 	for _, c := range b {

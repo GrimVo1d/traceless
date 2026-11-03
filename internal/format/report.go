@@ -47,6 +47,12 @@ func (r *Report) Add(f Field, grouped bool, size int64) {
 	r.fields = append(r.fields, f)
 }
 
+// Full reports whether new fields are only counted now. Callers can then
+// skip decoding a part they would only report.
+func (r *Report) Full() bool {
+	return len(r.fields) >= MaxFields
+}
+
 // Result returns the fields, with a final one counting those left out.
 func (r *Report) Result() []Field {
 	if r.omitted > 0 {

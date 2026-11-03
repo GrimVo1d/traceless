@@ -113,10 +113,10 @@ func TestScans(t *testing.T) {
 			// (restart markers trip it up), so pixels are compared with
 			// the sequential source; libjpeg shows both the same.
 			assertCleanCopy(t, ref, out)
-			if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+			if fields, err := h.Inspect(budget(), bytes.NewReader(in)); err != nil || len(fields) != 0 {
 				t.Errorf("Inspect = %v, %v; want no fields", fields, err)
 			}
-			if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+			if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
 				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
 			}
 		})
@@ -139,7 +139,7 @@ func TestScanLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := Handler{}.Inspect(bytes.NewReader(beforeEOI(many, tt.scans)))
+			_, err := Handler{}.Inspect(budget(), bytes.NewReader(beforeEOI(many, tt.scans)))
 			if !errors.Is(err, format.ErrUnsupported) || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("Inspect = %v, want %q", err, tt.want)
 			}
@@ -213,15 +213,15 @@ func TestRejectsBadProgression(t *testing.T) {
 	check := func(t *testing.T, in []byte, want error) {
 		t.Helper()
 		var h Handler
-		if _, err := h.Inspect(bytes.NewReader(in)); !errors.Is(err, want) {
+		if _, err := h.Inspect(budget(), bytes.NewReader(in)); !errors.Is(err, want) {
 			t.Errorf("Inspect = %v, want %v", err, want)
 		}
 		// Verify stops at the first scan Strip wouldn't write, which can
 		// come before the broken part.
-		if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, want) && !errors.Is(err, format.ErrMetadataRemains) {
+		if err := h.Verify(budget(), bytes.NewReader(in)); !errors.Is(err, want) && !errors.Is(err, format.ErrMetadataRemains) {
 			t.Errorf("Verify = %v, want %v", err, want)
 		}
-		if err := h.Strip(bytes.NewReader(in), io.Discard); !errors.Is(err, want) {
+		if err := h.Strip(budget(), bytes.NewReader(in), io.Discard); !errors.Is(err, want) {
 			t.Errorf("Strip = %v, want %v", err, want)
 		}
 	}
@@ -250,7 +250,7 @@ func TestScansHiddenData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := joinPieces(tt.in)
-			fields, err := Handler{}.Inspect(bytes.NewReader(in))
+			fields, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -282,7 +282,7 @@ func TestCoefficientsGrowWithData(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	_, err := Handler{}.Inspect(bytes.NewReader(in))
+	_, err := Handler{}.Inspect(budget(), bytes.NewReader(in))
 	runtime.ReadMemStats(&after)
 	if !errors.Is(err, format.ErrMalformed) {
 		t.Errorf("Inspect = %v, want ErrMalformed", err)
