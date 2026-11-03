@@ -29,7 +29,7 @@ type coefs struct {
 type coefGrid struct {
 	across int // blocks per row
 	rows   [][]int16
-	ends   [][]uint8 // per block, 1 + the index of its last nonzero AC coefficient, 0 if none
+	ends   [][]uint8 // per block, 1 + the index of its last nonzero AC coefficient, 0 if none; progressive only
 }
 
 // newCoefs sizes the buffer for f. Interleaved scans also code the blocks
