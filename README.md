@@ -105,27 +105,30 @@ go build -o traceless ./cmd/traceless
 
 traceless never overwrites an existing file unless you pass `-inplace`.
 
-For JPEG, `verify` is strict: it passes only files that are exactly what
-`strip` writes, since an encoder's free choices (Huffman tables, header
-bytes) can hide data in a file that shows no metadata. A photo straight
-from a camera fails it even after `inspect` comes back empty.
+`verify` is strict: it passes only files that are exactly what `strip`
+writes, since an encoder's free choices (compression, Huffman tables, chunk
+and header layout) can hide data in a file that shows no metadata. A photo
+straight from a camera fails it even after `inspect` comes back empty.
+
+The EXIF orientation is kept, as a minimal EXIF block holding only that
+tag, so rotated photos still display upright.
 
 ## Formats
 
 | Format | Status |
 |:--|:--|
 | PNG | ✅ supported |
-| JPEG | ✅ baseline and extended (not progressive yet) |
+| JPEG | ✅ baseline, extended and progressive |
 | Office documents, PDF, MP4 / HEIC, audio | 🗺️ planned |
 
 ## Limitations
 
-- Animated PNG (APNG) and progressive JPEG are refused for now.
+- Animated PNG (APNG) and arithmetic-coded JPEG are refused for now.
 - ICC color profiles are removed, so wide-gamut images (e.g. Display P3
   screenshots) can look slightly different.
 - JPEG image data is re-encoded losslessly with the standard Huffman tables:
   the pixels stay identical, but files that used optimized tables grow by
-  about 5-10%.
+  about 5-10%. Progressive JPEGs come out as baseline ones.
 - JPEG edge blocks that are partly outside the image keep their invisible
   part, since changing it would mean re-compressing the visible pixels.
 - Values viewers need (PNG gamma and primaries, JPEG quantization tables
