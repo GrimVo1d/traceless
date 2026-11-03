@@ -5,8 +5,14 @@
 // them: correct size, correct position, no duplicates. The pixel data is
 // decompressed, checked against the header, and re-compressed by our own
 // encoder, so nothing hidden in or after the compressed stream survives.
-// Everything is streamed; memory use depends on the image width, not the file
-// size.
+// Everything else is streamed; memory use depends on the image width, not the
+// file size.
+//
+// Palette images keep only the palette entries their pixels use: PLTE is cut
+// after the last one and zeroed in between, tRNS and bKGD follow. PLTE comes
+// before the pixels, so Strip holds back the rebuilt image data, up to
+// maxHeld, and writes these chunks first. Pixel indexes past the end of the
+// palette are refused.
 //
 // The EXIF orientation of the first eXIf chunk before the image data is kept:
 // Strip writes it as a minimal eXIf chunk that holds nothing else.
@@ -24,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"traceless/internal/format"
@@ -93,6 +100,35 @@ type processor struct {
 	pending     []pendingChunk // color space chunks not yet written
 	sawEXIF     bool           // an eXIf chunk was seen
 	orientation int            // EXIF orientation to keep, 0 if none
+
+	// Palette images: PLTE, tRNS and bKGD are made canonical once the image
+	// data has been read (see finishPalette).
+	plte, trns, bkgd []byte      // their chunk data
+	bkgdFirst        bool        // bKGD came before tRNS
+	held             *heldWriter // output of the image data, nil in modeInspect
+}
+
+// maxHeld caps the output Strip holds back for a palette image: its image
+// data, as re-compressed.
+const maxHeld = 64 << 20
+
+// heldWriter takes the output of a palette image's image data. Strip holds it
+// back until the pixels show which palette entries are used, since PLTE must
+// come first; Verify writes it through. Both apply the same cap.
+type heldWriter struct {
+	w   io.Writer     // where it goes
+	buf *bytes.Buffer // the output held back, nil to write through
+	n   int           // bytes written
+}
+
+func (hw *heldWriter) Write(b []byte) (int, error) {
+	if hw.n += len(b); hw.n > maxHeld {
+		return 0, unsupported("palette image data over %d MB", maxHeld>>20)
+	}
+	if hw.buf != nil {
+		return hw.buf.Write(b)
+	}
+	return hw.w.Write(b)
 }
 
 type pendingChunk struct {
@@ -210,6 +246,10 @@ func (p *processor) palette(h chunkHeader) error {
 		return err
 	}
 	l.sawPalette, l.paletteLen = true, entries
+	p.plte = data
+	if p.mode == modeStrip {
+		return nil // written by finishPalette
+	}
 	return p.keep(h, data)
 }
 
@@ -223,6 +263,14 @@ func (p *processor) image() error {
 	}
 	if err := p.flushColorSpace(); err != nil {
 		return err
+	}
+	palette := l.hdr.colorType == colorPalette
+	if palette && p.w != nil {
+		p.held = &heldWriter{w: p.w}
+		if p.mode == modeStrip {
+			p.held.buf = new(bytes.Buffer)
+		}
+		p.w = p.held
 	}
 	if p.orientation != 0 {
 		if err := p.write(func() error { return writeChunk(p.w, "eXIf", orientationChunk(p.orientation)) }); err != nil {
@@ -248,15 +296,95 @@ func (p *processor) image() error {
 			return err
 		}
 	}
-	if stats.badIndexes > 0 {
-		if err := p.found("Hidden data", fmt.Sprintf("%d pixels with out-of-range palette indexes", stats.badIndexes)); err != nil {
+	if stats.paddingRows > 0 {
+		if err := p.found("Hidden data", fmt.Sprintf("unused bits set in %d image rows", stats.paddingRows)); err != nil {
 			return err
 		}
 	}
-	if stats.paddingRows > 0 {
-		return p.found("Hidden data", fmt.Sprintf("unused bits set in %d image rows", stats.paddingRows))
+	if palette {
+		return p.finishPalette(&stats.used)
 	}
 	return nil
+}
+
+// finishPalette makes PLTE, tRNS and bKGD canonical once the pixels show
+// which palette entries they use: PLTE ends at the last used entry and the
+// unused ones before it are zeroed, tRNS loses unused entries and trailing
+// opaque ones (opaque is the default), and bKGD is dropped unless it names a
+// used entry. None of that changes what a viewer shows. Strip then writes
+// these chunks and the output it held back; Inspect and Verify report what
+// differs from them.
+func (p *processor) finishPalette(used *[256]bool) error {
+	last := 0
+	for i := range p.layout.paletteLen {
+		if used[i] {
+			last = i
+		}
+	}
+	plte := slices.Clone(p.plte[:3*(last+1)])
+	trns := slices.Clone(p.trns[:min(len(p.trns), last+1)])
+	for i := range last + 1 {
+		if !used[i] {
+			clear(plte[3*i : 3*i+3])
+			if i < len(trns) {
+				trns[i] = 255
+			}
+		}
+	}
+	for len(trns) > 0 && trns[len(trns)-1] == 255 {
+		trns = trns[:len(trns)-1]
+	}
+	bkgd := p.bkgd
+	if len(bkgd) == 1 && !used[bkgd[0]] {
+		if err := p.found("bKGD chunk", "palette entry no pixel uses"); err != nil {
+			return err
+		}
+		bkgd = nil
+	}
+	if !bytes.Equal(plte, p.plte) {
+		// Entries cut or zeroed.
+		n := p.layout.paletteLen - (last + 1)
+		for i := range last + 1 {
+			if !used[i] && slices.ContainsFunc(p.plte[3*i:3*i+3], func(b byte) bool { return b != 0 }) {
+				n++
+			}
+		}
+		if err := p.found("Hidden data", fmt.Sprintf("%d palette entries no pixel uses", n)); err != nil {
+			return err
+		}
+	}
+	if !bytes.Equal(trns, p.trns) {
+		if err := p.found("tRNS chunk", "alpha values that change nothing"); err != nil {
+			return err
+		}
+	}
+	if p.mode == modeVerify && p.bkgdFirst && len(trns) > 0 && bkgd != nil {
+		return errNotStripped // Strip writes tRNS first
+	}
+
+	hw := p.held
+	if hw == nil {
+		return nil // Inspect writes nothing
+	}
+	p.w, p.held = hw.w, nil
+	if hw.buf == nil {
+		return nil // Verify wrote the input's chunks
+	}
+	if err := writeChunk(p.w, "PLTE", plte); err != nil {
+		return err
+	}
+	if len(trns) > 0 {
+		if err := writeChunk(p.w, "tRNS", trns); err != nil {
+			return err
+		}
+	}
+	if bkgd != nil {
+		if err := writeChunk(p.w, "bKGD", bkgd); err != nil {
+			return err
+		}
+	}
+	_, err := p.w.Write(hw.buf.Bytes())
+	return err
 }
 
 func (p *processor) rendering(h chunkHeader) error {
@@ -273,6 +401,16 @@ func (p *processor) rendering(h chunkHeader) error {
 		return p.found(h.Type+" chunk", reason)
 	}
 	l.seen[h.Type] = true
+	if l.hdr.colorType == colorPalette && (h.Type == "tRNS" || h.Type == "bKGD") {
+		if h.Type == "tRNS" {
+			p.trns = data
+		} else {
+			p.bkgd, p.bkgdFirst = data, p.trns == nil
+		}
+		if p.mode == modeStrip {
+			return nil // written by finishPalette
+		}
+	}
 	if colorSpaceChunks[h.Type] {
 		p.pending = append(p.pending, pendingChunk{h, data})
 		return nil

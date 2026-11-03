@@ -10,6 +10,7 @@ import (
 	"image"
 	stdpng "image/png"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -423,10 +424,6 @@ func TestHiddenData(t *testing.T) {
 		{"unused bits",
 			paddingPNG(),
 			"Hidden data", nil},
-		{"out-of-range palette indexes",
-			pngOf(ihdrChunk(4, 1, 8, colorPalette, 0), encodeChunk("PLTE", []byte{9, 9, 9}),
-				encodeChunk("IDAT", deflate([]byte("\x00"+secret[:4]))), iendChunk),
-			"Hidden data", nil},
 		{"invalid sRGB intent",
 			pngOf(ihdr, encodeChunk("sRGB", []byte{0xee}), idat, iendChunk),
 			"sRGB chunk", nil},
@@ -555,6 +552,8 @@ func TestRejectsInvalidInput(t *testing.T) {
 		{"zero width", pngOf(ihdrChunk(0, 4, 8, colorRGB, 0), idat, iendChunk), format.ErrMalformed, nil},
 		{"no image data", pngOf(ihdr, iendChunk), format.ErrMalformed, nil},
 		{"too little image data", pngOf(ihdr, encodeChunk("IDAT", deflate(stream[:20])), iendChunk), format.ErrMalformed, nil},
+		{"palette index out of range", pngOf(ihdrChunk(4, 1, 8, colorPalette, 0), encodeChunk("PLTE", []byte{9, 9, 9}),
+			encodeChunk("IDAT", deflate([]byte{0, 0, 0, 1, 0})), iendChunk), format.ErrMalformed, nil},
 		{"invalid filter type", pngOf(ihdr, encodeChunk("IDAT", deflate(badFilter)), iendChunk), format.ErrMalformed, nil},
 		{"corrupt zlib", pngOf(ihdr, encodeChunk("IDAT", []byte("not zlib at all")), iendChunk), format.ErrMalformed, nil},
 		{"IDAT not consecutive", pngOf(ihdr, idat, encodeChunk("tEXt", []byte("a\x00b")), idat, iendChunk), format.ErrMalformed, format.ErrMetadataRemains},
@@ -755,4 +754,66 @@ func assertSamePixels(t *testing.T, got, want image.Image) {
 			}
 		}
 	}
+}
+
+// Viewers never show palette entries no pixel uses, so Strip cuts or zeroes
+// them, and drops alpha values that change nothing.
+func TestCanonicalPalette(t *testing.T) {
+	ihdr := ihdrChunk(4, 1, 8, colorPalette, 0)
+	idat := encodeChunk("IDAT", deflate([]byte{0, 0, 2, 3, 2})) // entries 0, 2 and 3
+	plte := encodeChunk("PLTE", []byte{9, 9, 9, 'S', 'E', 'C', 1, 2, 3, 4, 5, 6, 'R', 'E', 'T'})
+	tests := []struct {
+		name             string
+		input            []byte
+		fields           map[string]string
+		plte, trns, bkgd []byte // expected in the output, nil if absent
+	}{
+		{"unused entries",
+			pngOf(ihdr, plte, encodeChunk("tRNS", []byte{255, 'X', 128, 7, 'Y'}), encodeChunk("bKGD", []byte{3}), idat, iendChunk),
+			map[string]string{"Hidden data": "2 palette entries no pixel uses", "tRNS chunk": "alpha values that change nothing"},
+			[]byte{9, 9, 9, 0, 0, 0, 1, 2, 3, 4, 5, 6}, []byte{255, 255, 128, 7}, []byte{3}},
+		{"opaque tRNS",
+			pngOf(ihdr, encodeChunk("PLTE", []byte{9, 9, 9, 0, 0, 0, 1, 2, 3, 4, 5, 6}), encodeChunk("tRNS", []byte{128, 255, 255, 255}), idat, iendChunk),
+			map[string]string{"tRNS chunk": "alpha values that change nothing"},
+			[]byte{9, 9, 9, 0, 0, 0, 1, 2, 3, 4, 5, 6}, []byte{128}, nil},
+		{"background no pixel uses",
+			pngOf(ihdr, plte, encodeChunk("bKGD", []byte{4}), idat, iendChunk),
+			map[string]string{"Hidden data": "2 palette entries no pixel uses", "bKGD chunk": "palette entry no pixel uses"},
+			[]byte{9, 9, 9, 0, 0, 0, 1, 2, 3, 4, 5, 6}, nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var h Handler
+			fields, err := h.Inspect(bytes.NewReader(tt.input))
+			if got := fieldMap(fields); err != nil || !maps.Equal(got, tt.fields) {
+				t.Errorf("Inspect = %v, %v; want %v", got, err, tt.fields)
+			}
+			if err := h.Verify(bytes.NewReader(tt.input)); !errors.Is(err, format.ErrMetadataRemains) {
+				t.Errorf("Verify = %v, want ErrMetadataRemains", err)
+			}
+			out := strip(t, tt.input)
+			for typ, want := range map[string][]byte{"PLTE": tt.plte, "tRNS": tt.trns, "bKGD": tt.bkgd} {
+				if got := chunkData(out, typ); !bytes.Equal(got, want) {
+					t.Errorf("%s = %v, want %v", typ, got, want)
+				}
+			}
+			assertCleanCopy(t, tt.input, out)
+		})
+	}
+}
+
+// Strip writes tRNS before bKGD, so Verify refuses the other order even
+// though Inspect finds nothing to name.
+func TestVerifyPaletteChunkOrder(t *testing.T) {
+	in := pngOf(ihdrChunk(2, 1, 8, colorPalette, 0), encodeChunk("PLTE", []byte{1, 2, 3, 4, 5, 6}),
+		encodeChunk("bKGD", []byte{1}), encodeChunk("tRNS", []byte{128}),
+		encodeChunk("IDAT", deflate([]byte{0, 0, 1})), iendChunk)
+	var h Handler
+	if fields, err := h.Inspect(bytes.NewReader(in)); err != nil || len(fields) != 0 {
+		t.Errorf("Inspect = %v, %v; want nothing", fields, err)
+	}
+	if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, format.ErrMetadataRemains) {
+		t.Errorf("Verify = %v, want ErrMetadataRemains", err)
+	}
+	assertCleanCopy(t, in, strip(t, in))
 }

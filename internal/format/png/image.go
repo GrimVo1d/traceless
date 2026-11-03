@@ -16,10 +16,10 @@ const idatSize = 64 << 10
 
 // imageStats records what the pixel stream holds besides the pixels.
 type imageStats struct {
-	paddingRows int64 // rows with non-zero unused bits in their last byte
-	badIndexes  int64 // palette indexes out of range (see fixIndexes)
-	extraPixels bool  // decompressed data after the last row
-	extraStream int64 // compressed bytes after the end of the zlib stream
+	paddingRows int64     // rows with non-zero unused bits in their last byte
+	used        [256]bool // palette indexes the pixels use
+	extraPixels bool      // decompressed data after the last row
+	extraStream int64     // compressed bytes after the end of the zlib stream
 }
 
 // maxEmptyReads is how many reads in a row may return no data and no error
@@ -175,7 +175,9 @@ func processImage(h header, paletteLen int, ir *idatReader, w io.Writer) (imageS
 					stats.paddingRows++
 				}
 				if palette {
-					stats.badIndexes += fixIndexes(clean[:n], p.width, h.depth, paletteLen, true)
+					if err := markIndexes(clean[:n], p.width, h.depth, paletteLen, &stats.used); err != nil {
+						return stats, err
+					}
 				}
 				ft := 0
 				if adaptive {
@@ -192,7 +194,9 @@ func processImage(h header, paletteLen int, ir *idatReader, w io.Writer) (imageS
 					stats.paddingRows++
 				}
 				if palette {
-					stats.badIndexes += fixIndexes(row[1:], p.width, h.depth, paletteLen, false)
+					if err := markIndexes(row[1:], p.width, h.depth, paletteLen, &stats.used); err != nil {
+						return stats, err
+					}
 				}
 			}
 			copy(prevRaw, row[1:])
@@ -265,26 +269,21 @@ func zeroPadding(row []byte, width uint32, bitsPerPixel int) bool {
 	return true
 }
 
-// fixIndexes counts the palette indexes in row that are out of range, other
-// than the value paletteLen itself. Viewers render every out-of-range index
-// as opaque black, so the actual values are invisible and can carry data. If
-// fix is set, it rewrites them to paletteLen, which renders the same.
-func fixIndexes(row []byte, width uint32, depth uint8, paletteLen int, fix bool) int64 {
-	var n int64
+// markIndexes marks the palette indexes in row in used. An index past the
+// end of the palette is an error: viewers disagree on how to show it, and
+// libpng refuses it.
+func markIndexes(row []byte, width uint32, depth uint8, paletteLen int, used *[256]bool) error {
 	perByte := 8 / int(depth)
 	mask := byte(1<<depth - 1)
 	for i := range int(width) {
 		shift := uint(8 - int(depth)*(i%perByte+1))
-		b := &row[i/perByte]
-		if int(*b>>shift&mask) > paletteLen {
-			n++
-			if fix {
-				// paletteLen < 2^depth here, since a larger index exists.
-				*b = *b&^(mask<<shift) | byte(paletteLen)<<shift //nolint:gosec // see above
-			}
+		v := row[i/perByte] >> shift & mask
+		if int(v) >= paletteLen {
+			return malformed("palette index %d out of range (%d entries)", v, paletteLen)
 		}
+		used[v] = true
 	}
-	return n
+	return nil
 }
 
 // unfilter reverses the filter ft applied to row, in place. prev is the

@@ -2,9 +2,11 @@ package png
 
 import (
 	"bytes"
-	"encoding/binary"
+	"errors"
 	"math/rand/v2"
 	"testing"
+
+	"traceless/internal/format"
 )
 
 // TestStripPreservesPixels strips random valid images of every color type and
@@ -73,29 +75,9 @@ func TestStripPreservesPixels(t *testing.T) {
 	}
 }
 
-func TestFixIndexes(t *testing.T) {
-	// 2-bit indexes 0, 3, 1, 2 with a 2-entry palette: 3 is out of range,
-	// 2 is the canonical out-of-range value and stays.
-	row := []byte{0b00_11_01_10}
-	if n := fixIndexes(row, 4, 2, 2, true); n != 1 {
-		t.Errorf("fixed %d indexes, want 1", n)
-	}
-	if row[0] != 0b00_10_01_10 {
-		t.Errorf("row = %08b, want 00100110", row[0])
-	}
-	if n := fixIndexes(row, 4, 2, 2, false); n != 0 {
-		t.Errorf("fixed row still has %d bad indexes", n)
-	}
-
-	row8 := binary.BigEndian.AppendUint32(nil, 0x00ff0102)
-	if n := fixIndexes(row8, 4, 8, 2, true); n != 1 || row8[1] != 2 {
-		t.Errorf("8-bit: fixed %d, row %v", n, row8)
-	}
-}
-
-// TestFixIndexesRandom compares fixIndexes with a simple bit-by-bit reference
-// on random rows of every palette depth.
-func TestFixIndexesRandom(t *testing.T) {
+// TestMarkIndexes compares markIndexes with a simple bit-by-bit reference on
+// random rows of every palette depth.
+func TestMarkIndexes(t *testing.T) {
 	index := func(row []byte, i, depth int) int {
 		bit := i * depth
 		return int(row[bit/8]>>(8-depth-bit%8)) & (1<<depth - 1)
@@ -109,28 +91,23 @@ func TestFixIndexesRandom(t *testing.T) {
 		for j := range row {
 			row[j] = byte(rng.Uint32())
 		}
-		orig := bytes.Clone(row)
 
-		var want int64
+		var want [256]bool
+		bad := false
 		for i := range width {
-			if index(orig, i, depth) > paletteLen {
-				want++
+			if v := index(row, i, depth); v < paletteLen {
+				want[v] = true
+			} else {
+				bad = true
 			}
 		}
-		if got := fixIndexes(row, uint32(width), uint8(depth), paletteLen, true); got != want {
-			t.Fatalf("depth %d, %d entries: fixed %d indexes, want %d", depth, paletteLen, got, want)
+		var used [256]bool
+		err := markIndexes(row, uint32(width), uint8(depth), paletteLen, &used)
+		if bad != errors.Is(err, format.ErrMalformed) {
+			t.Fatalf("depth %d, %d entries, row %08b: err = %v, out of range: %v", depth, paletteLen, row, err, bad)
 		}
-		for i := range width {
-			// Out-of-range indexes become paletteLen, the canonical bad value.
-			if got, want := index(row, i, depth), min(index(orig, i, depth), paletteLen); got != want {
-				t.Fatalf("depth %d, pixel %d: index %d, want %d", depth, i, got, want)
-			}
-		}
-		if used := width * depth % 8; used != 0 {
-			pad := byte(0xff >> used)
-			if row[len(row)-1]&pad != orig[len(orig)-1]&pad {
-				t.Fatalf("depth %d, width %d: padding bits changed", depth, width)
-			}
+		if !bad && used != want {
+			t.Fatalf("depth %d, %d entries, row %08b: used indexes differ", depth, paletteLen, row)
 		}
 	}
 }

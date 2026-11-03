@@ -134,7 +134,7 @@ func palettePNG() []byte {
 	return pngOf(
 		ihdrChunk(5, 2, 2, colorPalette, 0),
 		encodeChunk("PLTE", []byte{255, 0, 0, 0, 255, 0, 0, 0, 255}),
-		encodeChunk("tRNS", []byte{128, 255}),
+		encodeChunk("tRNS", []byte{128}),
 		encodeChunk("bKGD", []byte{1}),
 		encodeChunk("IDAT", deflate(stream)),
 		iendChunk,
