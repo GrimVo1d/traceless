@@ -16,6 +16,11 @@ const (
 // still allows RGBA images over a million pixels wide.
 const maxRowBytes = 4 << 20
 
+// maxSide caps the width and the height at the user limits a default libpng
+// build refuses past. It bounds the rows, whose cost doesn't depend on their
+// size: a 1x2^28 image would take ~17 s.
+const maxSide = 1_000_000
+
 // maxPixels caps the image area (16384 x 16384). Work grows with the pixel
 // count the header claims, not with the file size, and deflate compresses
 // about 1000:1. Even with the cap, a 2 MB file can decode to 2 GiB and take
@@ -49,6 +54,9 @@ func parseHeader(b []byte) (header, error) {
 	}
 	if b[10] != 0 || b[11] != 0 || b[12] > 1 {
 		return header{}, malformed("invalid compression, filter or interlace method")
+	}
+	if h.width > maxSide || h.height > maxSide {
+		return header{}, unsupported("image side over %d pixels (%dx%d)", maxSide, h.width, h.height)
 	}
 	if rowBytes(h.width, h.bitsPerPixel()) > maxRowBytes {
 		return header{}, unsupported("image too wide (%d pixels)", h.width)

@@ -29,7 +29,9 @@ var handlers = []format.Handler{
 var ErrHardLinked = errors.New("file has other hard links that would keep the original data")
 
 // InspectFile detects the format of the file at path and lists its metadata.
-func InspectFile(ctx context.Context, path string) (format.Handler, []format.Field, error) {
+// Every function here spends at most l, and returns an error wrapping
+// format.ErrLimit if the file needs more. The CLI passes format.DefaultLimits.
+func InspectFile(ctx context.Context, l format.Limits, path string) (format.Handler, []format.Field, error) {
 	f, _, err := openRegular(path)
 	if err != nil {
 		return nil, nil, err
@@ -41,12 +43,12 @@ func InspectFile(ctx context.Context, path string) (format.Handler, []format.Fie
 	if err != nil {
 		return nil, nil, err
 	}
-	fields, err := h.Inspect(format.NewBudget(ctx, format.DefaultLimits), br)
+	fields, err := h.Inspect(format.NewBudget(ctx, l), br)
 	return h, fields, err
 }
 
 // VerifyFile checks that the file at path contains no metadata.
-func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
+func VerifyFile(ctx context.Context, l format.Limits, path string) (format.Handler, error) {
 	f, _, err := openRegular(path)
 	if err != nil {
 		return nil, err
@@ -58,7 +60,7 @@ func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return h, h.Verify(format.NewBudget(ctx, format.DefaultLimits), br)
+	return h, h.Verify(format.NewBudget(ctx, l), br)
 }
 
 // StripFile writes a copy of src without metadata to a new file dst, created
@@ -67,18 +69,18 @@ func VerifyFile(ctx context.Context, path string) (format.Handler, error) {
 // Output goes to a temporary file next to dst, is verified, and only then
 // moved into place, so dst never holds partial or unverified output.
 // Canceling ctx stops the strip and removes the temporary file.
-func StripFile(ctx context.Context, src, dst string) (format.Handler, error) {
-	return stripFile(ctx, src, dst, false)
+func StripFile(ctx context.Context, l format.Limits, src, dst string) (format.Handler, error) {
+	return stripFile(ctx, l, src, dst, false)
 }
 
 // StripInPlace replaces path with a copy without metadata, the same way
 // StripFile writes a new file. The file keeps its permission bits and must
 // have no other hard links, which would keep the original data reachable.
-func StripInPlace(ctx context.Context, path string) (format.Handler, error) {
-	return stripFile(ctx, path, path, true)
+func StripInPlace(ctx context.Context, l format.Limits, path string) (format.Handler, error) {
+	return stripFile(ctx, l, path, path, true)
 }
 
-func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handler, error) {
+func stripFile(ctx context.Context, l format.Limits, src, dst string, inPlace bool) (format.Handler, error) {
 	in, info, err := openRegular(src)
 	if err != nil {
 		return nil, err
@@ -112,10 +114,11 @@ func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handl
 		}
 	}()
 
-	bw := bufio.NewWriter(ctxWriter{ctx, tmp})
-	// Strip and the check of its output get a budget each: a file that
-	// strips within the limits also verifies within them.
-	if err := h.Strip(format.NewBudget(ctx, format.DefaultLimits), br, bw); err != nil {
+	// Strip and the check of its output share one budget, so the limits
+	// bound the whole call.
+	b := format.NewBudget(ctx, l)
+	bw := bufio.NewWriter(b.Writer(ctxWriter{ctx, tmp}))
+	if err := h.Strip(b, br, bw); err != nil {
 		return h, err
 	}
 	if err := bw.Flush(); err != nil {
@@ -124,7 +127,7 @@ func stripFile(ctx context.Context, src, dst string, inPlace bool) (format.Handl
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return h, err
 	}
-	if err := h.Verify(format.NewBudget(ctx, format.DefaultLimits), bufio.NewReader(ctxReader{ctx, tmp})); err != nil {
+	if err := h.Verify(b, bufio.NewReader(ctxReader{ctx, tmp})); err != nil {
 		return h, fmt.Errorf("verifying output: %w", err)
 	}
 	if err := tmp.Chmod(perm); err != nil {

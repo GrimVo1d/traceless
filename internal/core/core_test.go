@@ -1,14 +1,17 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"traceless/internal/format"
+	"traceless/internal/format/png"
 )
 
 const fixture = "../format/png/testdata/metadata.png"
@@ -54,14 +57,14 @@ func assertOnly(t *testing.T, dir string, names ...string) {
 func TestStripFile(t *testing.T) {
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "clean.png")
-	if _, err := StripFile(context.Background(), fixture, dst); err != nil {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, fixture, dst); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(context.Background(), dst); err != nil {
+	if _, err := VerifyFile(context.Background(), format.DefaultLimits, dst); err != nil {
 		t.Errorf("VerifyFile: %v", err)
 	}
-	if _, err := VerifyFile(context.Background(), fixture); !errors.Is(err, format.ErrMetadataRemains) {
-		t.Errorf("VerifyFile(context.Background(), fixture) = %v, want ErrMetadataRemains", err)
+	if _, err := VerifyFile(context.Background(), format.DefaultLimits, fixture); !errors.Is(err, format.ErrMetadataRemains) {
+		t.Errorf("VerifyFile(context.Background(), format.DefaultLimits, fixture) = %v, want ErrMetadataRemains", err)
 	}
 	info, err := os.Stat(dst)
 	if err != nil {
@@ -79,7 +82,7 @@ func TestStripFileNeverOverwrites(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("keep me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := StripFile(context.Background(), fixture, dst); !errors.Is(err, fs.ErrExist) {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, fixture, dst); !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("StripFile = %v, want ErrExist", err)
 	}
 	if data, _ := os.ReadFile(dst); string(data) != "keep me" {
@@ -91,10 +94,10 @@ func TestStripFileNeverOverwrites(t *testing.T) {
 func TestStripInPlace(t *testing.T) {
 	dir := t.TempDir()
 	path := copyFixture(t, dir, 0o640)
-	if _, err := StripInPlace(context.Background(), path); err != nil {
+	if _, err := StripInPlace(context.Background(), format.DefaultLimits, path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(context.Background(), path); err != nil {
+	if _, err := VerifyFile(context.Background(), format.DefaultLimits, path); err != nil {
 		t.Errorf("VerifyFile: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -113,7 +116,7 @@ func TestStripInPlaceRefusesHardLinks(t *testing.T) {
 	if err := os.Link(path, filepath.Join(dir, "other.png")); err != nil {
 		t.Skip("hard links not supported:", err)
 	}
-	if _, err := StripInPlace(context.Background(), path); !errors.Is(err, ErrHardLinked) {
+	if _, err := StripInPlace(context.Background(), format.DefaultLimits, path); !errors.Is(err, ErrHardLinked) {
 		t.Errorf("StripInPlace = %v, want ErrHardLinked", err)
 	}
 }
@@ -126,13 +129,13 @@ func TestPublishWithoutHardLinks(t *testing.T) {
 
 	dir := t.TempDir()
 	dst := filepath.Join(dir, "clean.png")
-	if _, err := StripFile(context.Background(), fixture, dst); err != nil {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, fixture, dst); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(context.Background(), dst); err != nil {
+	if _, err := VerifyFile(context.Background(), format.DefaultLimits, dst); err != nil {
 		t.Errorf("VerifyFile: %v", err)
 	}
-	if _, err := StripFile(context.Background(), fixture, dst); !errors.Is(err, fs.ErrExist) {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, fixture, dst); !errors.Is(err, fs.ErrExist) {
 		t.Errorf("second StripFile = %v, want ErrExist", err)
 	}
 	assertOnly(t, dir, "clean.png")
@@ -145,17 +148,49 @@ func TestStripFileFailureLeavesNothing(t *testing.T) {
 	if err := os.WriteFile(src, []byte("\x89PNG\r\n\x1a\ntruncated"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := StripFile(context.Background(), src, filepath.Join(dir, "out.png")); !errors.Is(err, format.ErrMalformed) {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, src, filepath.Join(dir, "out.png")); !errors.Is(err, format.ErrMalformed) {
 		t.Fatalf("StripFile = %v, want ErrMalformed", err)
 	}
 	assertOnly(t, dir, "broken.png")
+}
+
+// Strip and the check of its output spend one budget, and the output counts
+// against it.
+func TestStripFileBudget(t *testing.T) {
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The least work Strip alone needs; the check needs as much again.
+	work := int64(1)
+	for ; work < 1<<20; work++ {
+		err := (png.Handler{}).Strip(format.NewBudget(context.Background(), format.Limits{Memory: 64 << 20, Decompressed: 1 << 30, Work: work}), bytes.NewReader(data), io.Discard)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, format.ErrLimit) {
+			t.Fatal(err)
+		}
+	}
+	for name, l := range map[string]format.Limits{
+		"work":   {Memory: 64 << 20, Decompressed: 1 << 30, Work: work, Output: 1 << 30},
+		"output": {Memory: 64 << 20, Decompressed: 1 << 30, Work: 1 << 30, Output: 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := StripFile(context.Background(), l, fixture, filepath.Join(dir, "out.png")); !errors.Is(err, format.ErrLimit) {
+				t.Fatalf("StripFile = %v, want ErrLimit", err)
+			}
+			assertOnly(t, dir)
+		})
+	}
 }
 
 func TestStripFileCancelled(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := StripFile(ctx, fixture, filepath.Join(dir, "out.png")); !errors.Is(err, context.Canceled) {
+	if _, err := StripFile(ctx, format.DefaultLimits, fixture, filepath.Join(dir, "out.png")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("StripFile = %v, want context.Canceled", err)
 	}
 	assertOnly(t, dir)
@@ -167,16 +202,16 @@ func TestUnknownFormatFailsClosed(t *testing.T) {
 	if err := os.WriteFile(src, []byte("author: Jane Doe"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := StripFile(context.Background(), src, filepath.Join(dir, "out.txt")); !errors.Is(err, format.ErrUnknownFormat) {
+	if _, err := StripFile(context.Background(), format.DefaultLimits, src, filepath.Join(dir, "out.txt")); !errors.Is(err, format.ErrUnknownFormat) {
 		t.Errorf("StripFile = %v, want ErrUnknownFormat", err)
 	}
-	if _, _, err := InspectFile(context.Background(), src); !errors.Is(err, format.ErrUnknownFormat) {
+	if _, _, err := InspectFile(context.Background(), format.DefaultLimits, src); !errors.Is(err, format.ErrUnknownFormat) {
 		t.Errorf("InspectFile = %v, want ErrUnknownFormat", err)
 	}
 }
 
 func TestRefusesNonRegularFiles(t *testing.T) {
-	if _, _, err := InspectFile(context.Background(), t.TempDir()); err == nil {
+	if _, _, err := InspectFile(context.Background(), format.DefaultLimits, t.TempDir()); err == nil {
 		t.Error("InspectFile accepted a directory")
 	}
 }

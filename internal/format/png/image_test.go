@@ -111,3 +111,12 @@ func TestMarkIndexes(t *testing.T) {
 		}
 	}
 }
+
+// maxSide itself is allowed on either side.
+func TestMaxSide(t *testing.T) {
+	for _, ihdr := range [][]byte{ihdrChunk(maxSide, 1, 1, colorGray, 0), ihdrChunk(1, maxSide, 1, colorGray, 0)} {
+		if _, err := parseHeader(ihdr[8 : 8+13]); err != nil {
+			t.Errorf("parseHeader: %v", err)
+		}
+	}
+}

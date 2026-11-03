@@ -53,7 +53,8 @@ func (Handler) Inspect(b *format.Budget, r io.Reader) ([]format.Field, error) {
 
 // Strip implements format.Handler.
 func (Handler) Strip(b *format.Budget, r io.Reader, w io.Writer) error {
-	p := &processor{mode: modeStrip, budget: b, out: bufio.NewWriter(w)}
+	p := &processor{mode: modeStrip, budget: b}
+	p.setOutput(w)
 	if err := p.run(r); err != nil {
 		return err
 	}
@@ -67,7 +68,8 @@ func (Handler) Strip(b *format.Budget, r io.Reader, w io.Writer) error {
 // canonical form has none left.
 func (Handler) Verify(b *format.Budget, r io.Reader) error {
 	return format.VerifyFixedPoint(b, r, errNotStripped, func(in io.Reader, out io.Writer) error {
-		p := &processor{mode: modeVerify, budget: b, out: bufio.NewWriter(out)}
+		p := &processor{mode: modeVerify, budget: b}
+		p.setOutput(out)
 		if err := p.run(in); err != nil {
 			return err
 		}
@@ -95,6 +97,7 @@ type processor struct {
 	mode    mode
 	budget  *format.Budget
 	out     *bufio.Writer // rebuilt file, nil in modeInspect
+	sink    *errWriter    // what out writes to
 	mr      *markerReader
 	hdr     header
 	report  format.Report
@@ -350,7 +353,7 @@ func (p *processor) stream(sc scan) error {
 			return err
 		}
 		p.emit(&es, ci, bx >= c.bw || by >= c.bh, &blk)
-		return nil
+		return p.outErr()
 	})
 	if err != nil {
 		return err
@@ -426,7 +429,7 @@ func (p *processor) rebuild() error {
 			blk[0] = es.last[ci]
 		}
 		p.emit(&es, ci, outside, &blk)
-		return nil
+		return p.outErr()
 	})
 	if err != nil {
 		return err
@@ -435,6 +438,37 @@ func (p *processor) rebuild() error {
 		es.bw.flush()
 	}
 	return nil
+}
+
+// setOutput makes the processor write the rebuilt file to w.
+func (p *processor) setOutput(w io.Writer) {
+	p.sink = &errWriter{w: w}
+	p.out = bufio.NewWriter(p.sink)
+}
+
+// outErr returns the first error writing the output, so the block loops stop
+// at a full or failing output rather than encode the rest of the image.
+func (p *processor) outErr() error {
+	if p.sink == nil {
+		return nil
+	}
+	return p.sink.err
+}
+
+// errWriter remembers the first error of w. The bitWriter ignores the errors
+// of its bufio.Writer, which come back only from Flush.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (ew *errWriter) Write(p []byte) (int, error) {
+	if ew.err != nil {
+		return 0, ew.err
+	}
+	n, err := ew.w.Write(p)
+	ew.err = err
+	return n, err
 }
 
 // decode walks the entropy-coded data of a scan, calling fn for each block

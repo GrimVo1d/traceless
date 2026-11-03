@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -99,5 +100,24 @@ func TestBudgetCanceled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Work after cancel = %v, want context.Canceled", err)
+	}
+}
+
+// Writer stops at Limits.Output before writing, and Held reports what is held.
+func TestBudgetWriter(t *testing.T) {
+	b := NewBudget(context.Background(), Limits{Memory: 100, Output: 10})
+	var out bytes.Buffer
+	w := b.Writer(&out)
+	if _, err := w.Write([]byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("x")); !errors.Is(err, ErrLimit) {
+		t.Errorf("Write over the limit = %v, want ErrLimit", err)
+	}
+	if out.String() != "0123456789" {
+		t.Errorf("wrote %q", out.String())
+	}
+	if err := b.Hold(40); err != nil || b.Held() != 40 {
+		t.Errorf("Held = %d after Hold(40): %v", b.Held(), err)
 	}
 }

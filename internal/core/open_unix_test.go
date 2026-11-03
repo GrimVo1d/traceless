@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"traceless/internal/format"
 )
 
 // Opening a FIFO must fail fast instead of blocking until a writer appears.
@@ -18,7 +20,7 @@ func TestRefusesFIFO(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := InspectFile(context.Background(), path)
+		_, _, err := InspectFile(context.Background(), format.DefaultLimits, path)
 		done <- err
 	}()
 	select {

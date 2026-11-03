@@ -548,6 +548,8 @@ func TestRejectsInvalidInput(t *testing.T) {
 		{"APNG", pngOf(ihdr, encodeChunk("acTL", make([]byte, 8)), idat, iendChunk), format.ErrUnsupported, nil},
 		{"image too wide", pngOf(ihdrChunk(1<<22, 1, 8, colorRGBA, 0), idat, iendChunk), format.ErrUnsupported, nil},
 		{"image too large", pngOf(ihdrChunk(1, 400_000_000, 8, colorGray, 0), idat, iendChunk), format.ErrUnsupported, nil},
+		{"image too tall", pngOf(ihdrChunk(1, maxSide+1, 8, colorGray, 0), idat, iendChunk), format.ErrUnsupported, nil},
+		{"image too long", pngOf(ihdrChunk(maxSide+1, 1, 1, colorGray, 0), idat, iendChunk), format.ErrUnsupported, nil},
 		{"invalid bit depth", pngOf(ihdrChunk(4, 4, 3, colorRGB, 0), idat, iendChunk), format.ErrMalformed, nil},
 		{"zero width", pngOf(ihdrChunk(0, 4, 8, colorRGB, 0), idat, iendChunk), format.ErrMalformed, nil},
 		{"no image data", pngOf(ihdr, iendChunk), format.ErrMalformed, nil},

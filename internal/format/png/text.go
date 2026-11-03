@@ -3,6 +3,7 @@ package png
 import (
 	"bytes"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -51,10 +52,13 @@ func (td *textDecoder) describe(h chunkHeader, data io.Reader) (f format.Field, 
 			return format.Field{}, false, err
 		}
 	}
-	b, err := io.ReadAll(io.LimitReader(data, maxChunkRead))
-	if err != nil {
+	// One buffer of the size held: ReadAll's growth would need about twice.
+	b := make([]byte, n)
+	k, err := io.ReadFull(data, b)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return format.Field{}, false, err
 	}
+	b = b[:k]
 
 	var name, value string
 	var ok bool

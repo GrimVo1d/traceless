@@ -459,12 +459,12 @@ func (p *processor) exif(h chunkHeader) error {
 	p.sawEXIF = true
 	var data []byte // nil if too large to decode
 	if h.Length <= maxChunkRead {
-		// Read what is there rather than allocate the claimed length.
-		var err error
-		if data, err = io.ReadAll(p.cr.Data()); err != nil {
+		if err := p.budget.Hold(int64(h.Length)); err != nil {
 			return err
 		}
-		if err := p.cr.Finish(); err != nil {
+		defer p.budget.Release(int64(h.Length))
+		var err error
+		if data, err = p.cr.ReadAll(h); err != nil {
 			return err
 		}
 	}

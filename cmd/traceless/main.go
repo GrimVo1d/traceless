@@ -98,7 +98,7 @@ func runInspect(ctx context.Context, args []string) int {
 		if ctx.Err() != nil {
 			break
 		}
-		h, fields, err := core.InspectFile(ctx, path)
+		h, fields, err := core.InspectFile(ctx, format.DefaultLimits, path)
 		if err != nil {
 			code = fail(path, err)
 			continue
@@ -152,9 +152,9 @@ func runStrip(ctx context.Context, args []string) int {
 		var h format.Handler
 		var err error
 		if *inplace {
-			h, err = core.StripInPlace(ctx, src)
+			h, err = core.StripInPlace(ctx, format.DefaultLimits, src)
 		} else {
-			h, err = core.StripFile(ctx, src, dst)
+			h, err = core.StripFile(ctx, format.DefaultLimits, src, dst)
 		}
 		if err != nil {
 			code = fail(path, err)
@@ -175,7 +175,7 @@ func runVerify(ctx context.Context, args []string) int {
 		if ctx.Err() != nil {
 			break
 		}
-		h, err := core.VerifyFile(ctx, path)
+		h, err := core.VerifyFile(ctx, format.DefaultLimits, path)
 		if err != nil {
 			code = fail(path, err)
 			continue
@@ -203,7 +203,7 @@ func inspectAll(ctx context.Context, paths []string) ([]inspectResult, int) {
 			break
 		}
 		r := inspectResult{File: path, Fields: []format.Field{}}
-		h, fields, err := core.InspectFile(ctx, path)
+		h, fields, err := core.InspectFile(ctx, format.DefaultLimits, path)
 		if h != nil {
 			r.Format = h.Name()
 		}

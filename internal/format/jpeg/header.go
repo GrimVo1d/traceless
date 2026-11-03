@@ -160,7 +160,8 @@ func (hd *header) parseDHT(data []byte) error {
 		if n == 0 || n > 256 || len(data) < 17+n {
 			return malformed("DHT table with %d symbols", n)
 		}
-		s.symbols = data[17 : 17+n]
+		// A copy: the decoder outlives the segment, which can be 64 KB.
+		s.symbols = slices.Clone(data[17 : 17+n])
 		if tc == 0 && slices.Max(s.symbols) > 15 {
 			// libjpeg refuses such tables, so viewers show nothing.
 			return malformed("DC table symbol %d", slices.Max(s.symbols))

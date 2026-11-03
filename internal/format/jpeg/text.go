@@ -76,6 +76,8 @@ func (p *processor) describe(m byte, data []byte) {
 		p.report.Add(format.Field{Name: name, Value: value}, false, 0)
 	}
 	switch {
+	case p.report.Full():
+		// It would only be counted, so don't decode it.
 	case m == markerCOM:
 		add("Comment", text(data))
 		return
@@ -142,6 +144,9 @@ func iptc(data []byte) []format.Field {
 		}
 		if id == 0x0404 {
 			fields = append(fields, iim(body[:size])...)
+			if len(fields) > format.MaxFields {
+				break
+			}
 		}
 		data = body[min(size+size%2, uint64(len(body))):]
 	}
@@ -167,6 +172,9 @@ func iim(data []byte) []format.Field {
 			name = fmt.Sprintf("2:%d", dataset)
 		}
 		fields = append(fields, format.Field{Name: "IPTC " + name, Value: text(value)})
+		if len(fields) > format.MaxFields {
+			break // the report would only count the rest
+		}
 	}
 	return fields
 }

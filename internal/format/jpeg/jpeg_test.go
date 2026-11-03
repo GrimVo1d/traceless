@@ -721,3 +721,32 @@ func TestBudgetCanceled(t *testing.T) {
 		t.Errorf("Strip = %v, want context.Canceled", err)
 	}
 }
+
+// A failing output stops Strip soon, not after encoding the whole image.
+func TestStripStopsAtOutputError(t *testing.T) {
+	rng := rand.New(rand.NewPCG(7, 8))
+	img := image.NewGray(image.Rect(0, 0, 1024, 1024))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rng.Uint32())
+	}
+	data := encode(t, img)
+	b := format.NewBudget(context.Background(), format.Limits{Memory: 64 << 20, Decompressed: 1 << 30, Work: 1 << 30, Output: 64 << 10})
+	in := &countingReader{r: bytes.NewReader(data)}
+	if err := (Handler{}).Strip(b, in, b.Writer(io.Discard)); !errors.Is(err, format.ErrLimit) {
+		t.Fatalf("Strip = %v, want ErrLimit", err)
+	}
+	if in.n > int64(len(data))/4 {
+		t.Errorf("read %d of %d bytes after the output filled at 64 KB", in.n, len(data))
+	}
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.n += int64(n)
+	return n, err
+}
