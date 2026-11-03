@@ -11,6 +11,7 @@ import (
 	"image"
 	stdjpeg "image/jpeg"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -437,58 +438,58 @@ func TestRejectsInvalidInput(t *testing.T) {
 	sos := "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
 
 	malformedCases := map[string][]byte{
-		"empty":                  nil,
-		"SOI only":               []byte("\xff\xd8"),
-		"not a JPEG":             []byte("\xff\xd9\xff\xd8"),
-		"missing EOI":            base[:len(base)-2],
-		"truncated segment":      base[:30],
-		"no image data":          []byte("\xff\xd8\xff\xd9"),
-		"segment length 1":       withSegments(base, []byte("\xff\xe1\x00\x01")),
-		"second SOI":             withSegments(base, []byte("\xff\xd8")),
-		"restart outside scan":   withSegments(base, []byte("\xff\xd0")),
-		"scan before frame":      replace(gray, sof, ""),
-		"two frames":             replace(gray, sof, sof+sof),
-		"undefined table":        replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x22\x00\x3f\x00"),
-		"undefined quant table":  replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x11\x01"),
-		"baseline table 2":       replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x20\x00\x3f\x00"),
-		"wrong scan component":   replace(gray, sos, "\xff\xda\x00\x08\x01\x07\x00\x00\x3f\x00"),
-		"spectral selection":     replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x00\x00\x3e\x00"),
-		"SOS length":             replace(gray, sos, "\xff\xda\x00\x09\x01\x01\x00\x00\x3f\x00\x00"),
-		"SOF length":             replace(gray, sof, "\xff\xc0\x00\x0c\x08\x00\x08\x00\x08\x01\x01\x11\x00\x00"),
-		"width 0":                replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x00\x01\x01\x11\x00"),
-		"sampling 0":             replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x01\x00"),
-		"duplicate component":    replace(color3, "\x02\x11\x00", "\x01\x11\x00"),
-		"too many blocks":        built{width: 8, height: 8, sampling: []byte{0x44, 0x11, 0x11}, data: []byte{}}.bytes(),
-		"quantization value 0":   replace(gray, "\xff\xdb\x00\x43\x00\x01", "\xff\xdb\x00\x43\x00\x00"),
-		"truncated DQT":          replace(gray, "\xff\xdb\x00\x43", "\xff\xdb\x00\x42"),
-		"oversubscribed table":   withSegments(gray, seg(markerDHT, appendDHT(nil, 0, 2, huffSpec{[16]byte{3}, []byte{0, 1, 2}}))),
-		"bad DRI length":         withSegments(gray, seg(markerDRI, []byte{0, 1, 0})),
-		"data ends inside block": grayData(""),
-		"invalid Huffman code":   grayData("\xff\x00\xff\x00"),
-		"DC out of range":        grayData(blockData(block{1500})),
-		"wrong restart marker":   built{width: 16, height: 8, restart: 1, data: []byte("\x2b\xff\xd1\x2b")}.bytes(),
-		"missing restart marker": built{width: 16, height: 8, restart: 1, data: []byte("\x2b\x2b")}.bytes(),
-		"duplicate JFIF":         withSegments(base, app(0, jfifData(0, 0, "")), app(0, jfifData(0, 0, ""))),
-		"JFIF units":             withSegments(base, app(0, prefixJFIF+"\x01\x02\x07\x00\x01\x00\x01\x00\x00")),
-		"truncated thumbnail":    withSegments(base, app(0, prefixJFIF+"\x01\x02\x00\x00\x01\x00\x01\x02\x02")),
-		"duplicate Adobe":        withSegments(base, app(14, adobeData(1, "")), app(14, adobeData(1, ""))),
-		"Adobe transform 3":      withSegments(base, app(14, adobeData(3, ""))),
-		"YCCK with 3 components": withSegments(base, app(14, adobeData(2, ""))),
-		"stuffed fill bytes":     grayData("\xff\xff\x00"),
-		"all-ones Huffman code":  gray8(appendDHT(appendDHT(nil, 0, 0, huffSpec{[16]byte{2}, []byte{0, 1}}), 1, 0, stdLumaAC), "\x2b"),
-		"DC symbol 16":           gray8(appendDHT(appendDHT(nil, 0, 0, huffSpec{[16]byte{1}, []byte{16}}), 1, 0, stdLumaAC), "\x2b"),
+		"empty":                             nil,
+		"SOI only":                          []byte("\xff\xd8"),
+		"not a JPEG":                        []byte("\xff\xd9\xff\xd8"),
+		"missing EOI":                       base[:len(base)-2],
+		"truncated segment":                 base[:30],
+		"no image data":                     []byte("\xff\xd8\xff\xd9"),
+		"segment length 1":                  withSegments(base, []byte("\xff\xe1\x00\x01")),
+		"second SOI":                        withSegments(base, []byte("\xff\xd8")),
+		"restart outside scan":              withSegments(base, []byte("\xff\xd0")),
+		"scan before frame":                 replace(gray, sof, ""),
+		"two frames":                        replace(gray, sof, sof+sof),
+		"undefined table":                   replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x22\x00\x3f\x00"),
+		"undefined quant table":             replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x11\x01"),
+		"baseline table 2":                  replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x20\x00\x3f\x00"),
+		"wrong scan component":              replace(gray, sos, "\xff\xda\x00\x08\x01\x07\x00\x00\x3f\x00"),
+		"spectral selection":                replace(gray, sos, "\xff\xda\x00\x08\x01\x01\x00\x00\x3e\x00"),
+		"SOS length":                        replace(gray, sos, "\xff\xda\x00\x09\x01\x01\x00\x00\x3f\x00\x00"),
+		"SOF length":                        replace(gray, sof, "\xff\xc0\x00\x0c\x08\x00\x08\x00\x08\x01\x01\x11\x00\x00"),
+		"width 0":                           replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x00\x01\x01\x11\x00"),
+		"sampling 0":                        replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x01\x00"),
+		"duplicate component":               replace(color3, "\x02\x11\x00", "\x01\x11\x00"),
+		"too many blocks":                   built{width: 8, height: 8, sampling: []byte{0x44, 0x11, 0x11}, data: []byte{}}.bytes(),
+		"quantization value 0":              replace(gray, "\xff\xdb\x00\x43\x00\x01", "\xff\xdb\x00\x43\x00\x00"),
+		"truncated DQT":                     replace(gray, "\xff\xdb\x00\x43", "\xff\xdb\x00\x42"),
+		"oversubscribed table":              withSegments(gray, seg(markerDHT, appendDHT(nil, 0, 2, huffSpec{[16]byte{3}, []byte{0, 1, 2}}))),
+		"bad DRI length":                    withSegments(gray, seg(markerDRI, []byte{0, 1, 0})),
+		"data ends inside block":            grayData(""),
+		"invalid Huffman code":              grayData("\xff\x00\xff\x00"),
+		"DC out of range":                   grayData(blockData(block{1500})),
+		"wrong restart marker":              built{width: 16, height: 8, restart: 1, data: []byte("\x2b\xff\xd1\x2b")}.bytes(),
+		"missing restart marker":            built{width: 16, height: 8, restart: 1, data: []byte("\x2b\x2b")}.bytes(),
+		"duplicate JFIF":                    withSegments(base, app(0, jfifData(0, 0, "")), app(0, jfifData(0, 0, ""))),
+		"JFIF units":                        withSegments(base, app(0, prefixJFIF+"\x01\x02\x07\x00\x01\x00\x01\x00\x00")),
+		"truncated thumbnail":               withSegments(base, app(0, prefixJFIF+"\x01\x02\x00\x00\x01\x00\x01\x02\x02")),
+		"duplicate Adobe":                   withSegments(base, app(14, adobeData(1, "")), app(14, adobeData(1, ""))),
+		"Adobe transform 3":                 withSegments(base, app(14, adobeData(3, ""))),
+		"YCCK with 3 components":            withSegments(base, app(14, adobeData(2, ""))),
+		"stuffed fill bytes":                grayData("\xff\xff\x00"),
+		"all-ones Huffman code":             gray8(appendDHT(appendDHT(nil, 0, 0, huffSpec{[16]byte{2}, []byte{0, 1}}), 1, 0, stdLumaAC), "\x2b"),
+		"DC and AC in one progressive scan": replace(gray, "\xff\xc0", "\xff\xc2"),
+		"DC symbol 16":                      gray8(appendDHT(appendDHT(nil, 0, 0, huffSpec{[16]byte{1}, []byte{16}}), 1, 0, stdLumaAC), "\x2b"),
 	}
 	unsupportedCases := map[string][]byte{
-		"progressive":       replace(gray, "\xff\xc0", "\xff\xc2"),
-		"arithmetic":        replace(gray, "\xff\xc0", "\xff\xc9"),
-		"lossless":          replace(gray, "\xff\xc0", "\xff\xc3"),
-		"12-bit":            replace(gray, sof, "\xff\xc0\x00\x0b\x0c\x00\x08\x00\x08\x01\x01\x11\x00"),
-		"height from DNL":   replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x00\x00\x08\x01\x01\x11\x00"),
-		"two components":    built{width: 8, height: 8, sampling: []byte{0x11, 0x11}, data: []byte{}}.bytes(),
-		"several scans":     replace(color3, "\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11", "\xff\xda\x00\x08\x01\x01\x00"),
-		"DAC":               withSegments(gray, seg(markerDAC, []byte{0, 0})),
-		"reserved marker":   withSegments(gray, seg(0xf0, nil)),
-		"segment after EOI": beforeEOI(gray, string(seg(markerDQT, append([]byte{0}, bytes.Repeat([]byte{1}, 64)...)))),
+		"arithmetic":         replace(gray, "\xff\xc0", "\xff\xc9"),
+		"lossless":           replace(gray, "\xff\xc0", "\xff\xc3"),
+		"12-bit":             replace(gray, sof, "\xff\xc0\x00\x0b\x0c\x00\x08\x00\x08\x01\x01\x11\x00"),
+		"height from DNL":    replace(gray, sof, "\xff\xc0\x00\x0b\x08\x00\x00\x00\x08\x01\x01\x11\x00"),
+		"two components":     built{width: 8, height: 8, sampling: []byte{0x11, 0x11}, data: []byte{}}.bytes(),
+		"missing components": replace(color3, "\xff\xda\x00\x0c\x03\x01\x00\x02\x11\x03\x11", "\xff\xda\x00\x08\x01\x01\x00"),
+		"DAC":                withSegments(gray, seg(markerDAC, []byte{0, 0})),
+		"reserved marker":    withSegments(gray, seg(0xf0, nil)),
+		"segment after EOI":  beforeEOI(gray, string(seg(markerDQT, append([]byte{0}, bytes.Repeat([]byte{1}, 64)...)))),
 	}
 	check := func(t *testing.T, in []byte, want error) {
 		t.Helper()
@@ -496,7 +497,9 @@ func TestRejectsInvalidInput(t *testing.T) {
 		if _, err := h.Inspect(bytes.NewReader(in)); !errors.Is(err, want) {
 			t.Errorf("Inspect = %v, want %v", err, want)
 		}
-		if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, want) {
+		// Verify stops at the first scan Strip wouldn't write, which can
+		// come before the broken part.
+		if err := h.Verify(bytes.NewReader(in)); !errors.Is(err, want) && !errors.Is(err, format.ErrMetadataRemains) {
 			t.Errorf("Verify = %v, want %v", err, want)
 		}
 		if err := h.Strip(bytes.NewReader(in), io.Discard); !errors.Is(err, want) {
@@ -625,6 +628,30 @@ func TestInspectDecodesOneEXIF(t *testing.T) {
 
 // TestFixture keeps testdata/metadata.jpg, a file with known metadata used by
 // the fuzz corpus and the leak checker. Regenerate it with -update.
+// Verify compares the input with the rebuilt file as both stream; a stripped
+// file larger than what the comparison may hold must still pass.
+func TestVerifyLargeImage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	img := image.NewRGBA(image.Rect(0, 0, 1600, 1600))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rng.Uint32())
+	}
+	var buf bytes.Buffer
+	if err := stdjpeg.Encode(&buf, img, &stdjpeg.Options{Quality: 100}); err != nil {
+		t.Fatal(err)
+	}
+	out := strip(t, buf.Bytes())
+	if len(out) <= 4<<20 { // format.maxLag
+		t.Fatalf("stripped file has only %d bytes", len(out))
+	}
+	if err := (Handler{}).Verify(bytes.NewReader(out)); err != nil {
+		t.Errorf("Verify: %v", err)
+	}
+}
+
 func TestFixture(t *testing.T) {
 	path := filepath.Join("testdata", "metadata.jpg")
 	if *update {

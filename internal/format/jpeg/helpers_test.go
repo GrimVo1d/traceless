@@ -182,7 +182,7 @@ func (b built) bytes() []byte {
 // zeroData codes all-zero blocks for the frame in sof.
 func zeroData(sof []byte, restart int) []byte {
 	var hd header
-	if err := hd.parseSOF(sof); err != nil {
+	if err := hd.parseSOF(markerSOF0, sof); err != nil {
 		panic(err)
 	}
 	f := hd.frame

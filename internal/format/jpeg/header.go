@@ -15,6 +15,9 @@ const (
 
 	// maxSampling is the largest sampling factor a component may have.
 	maxSampling = 4
+
+	// maxAl is the largest successive approximation bit position.
+	maxAl = 13
 )
 
 // Identifiers at the start of APPn segments.
@@ -54,24 +57,61 @@ type jfif struct {
 	xd, yd uint16
 }
 
-// header collects everything before the scan. Tables are counted per slot,
-// so definitions that are replaced or never referenced can be reported.
+// header collects the tables, the frame and the kept APPn values. Table
+// definitions are tracked per slot, so ones that are replaced or never used
+// can be reported.
 type header struct {
 	frame       *frame
 	baseline    bool // SOF0: Huffman tables 0 and 1 only
+	progressive bool // SOF2
 	quant       [4]*[64]uint16
-	quantDefs   [4]int
+	quantDefs   [4]defs
 	huff        [2][4]*decoder // [0] DC, [1] AC
-	huffDefs    [2][4]int
+	huffDefs    [2][4]defs
 	restart     int // restart interval in MCUs, 0 for none
-	restartDefs int
+	restartDefs defs
 	jfif        *jfif
 	adobe       *byte // Adobe color transform
 	sawEXIF     bool  // the first EXIF segment was seen
 	orientation int   // its Orientation tag, 0 if none
 
-	// Decided by checkScan.
+	// Decided by colors.
 	keepAdobe bool
+
+	// What the scans so far have coded, per frame component.
+	coded    [4]bool     // sequential: the component was scanned
+	coefBits [4][64]int8 // progressive: the last scan's bit position for each coefficient, -1 if none
+}
+
+// defs tracks the definitions of one table slot.
+type defs struct {
+	defined, used bool // the current definition
+	unused        int  // earlier definitions no scan used
+}
+
+func (d *defs) define() {
+	if d.defined && !d.used {
+		d.unused++
+	}
+	d.defined, d.used = true, false
+}
+
+func (d *defs) use() { d.used = true }
+
+// count returns the number of definitions no scan used, the current one
+// included.
+func (d *defs) count() int {
+	if d.defined && !d.used {
+		return d.unused + 1
+	}
+	return d.unused
+}
+
+// scan is a parsed scan header.
+type scan struct {
+	comps  []int // indexes into frame.comps, in frame order
+	ss, se byte  // spectral selection: the first and last coefficient coded
+	ah, al byte  // successive approximation: previous and current bit position
 }
 
 func (hd *header) parseDQT(data []byte) error {
@@ -96,7 +136,7 @@ func (hd *header) parseDQT(data []byte) error {
 			}
 		}
 		hd.quant[tq] = &t
-		hd.quantDefs[tq]++
+		hd.quantDefs[tq].define()
 		data = data[1+size:]
 	}
 	return nil
@@ -130,7 +170,7 @@ func (hd *header) parseDHT(data []byte) error {
 			return err
 		}
 		hd.huff[tc][th] = d
-		hd.huffDefs[tc][th]++
+		hd.huffDefs[tc][th].define()
 		data = data[17+n:]
 	}
 	return nil
@@ -141,11 +181,12 @@ func (hd *header) parseDRI(data []byte) error {
 		return malformed("DRI segment of %d bytes", len(data))
 	}
 	hd.restart = int(binary.BigEndian.Uint16(data))
-	hd.restartDefs++
+	hd.restartDefs.define()
 	return nil
 }
 
-func (hd *header) parseSOF(data []byte) error {
+// parseSOF reads a frame header of type m: SOF0, SOF1 or SOF2.
+func (hd *header) parseSOF(m byte, data []byte) error {
 	if hd.frame != nil {
 		return malformed("more than one frame header")
 	}
@@ -198,75 +239,156 @@ func (hd *header) parseSOF(data []byte) error {
 		c.bh = ceilDiv(ceilDiv(f.height*c.v, f.vmax), 8)
 	}
 	hd.frame = f
+	hd.baseline, hd.progressive = m == markerSOF0, m == markerSOF2
+	for i := range hd.coefBits {
+		for k := range hd.coefBits[i] {
+			hd.coefBits[i][k] = -1
+		}
+	}
 	return nil
 }
 
-// parseSOS reads the scan header. Only one scan with every component is
-// supported: baseline files and most others have exactly that.
-func (hd *header) parseSOS(data []byte, baseline bool) error {
+// parseSOS reads a scan header, checks it against the scans before it and
+// marks the tables it uses.
+func (hd *header) parseSOS(data []byte) (scan, error) {
+	var sc scan
 	f := hd.frame
 	if f == nil {
-		return malformed("scan before the frame header")
+		return sc, malformed("scan before the frame header")
 	}
 	if len(data) < 1 {
-		return malformed("truncated SOS segment")
+		return sc, malformed("truncated SOS segment")
 	}
 	n := int(data[0])
 	if len(data) != 4+2*n {
-		return malformed("SOS segment of %d bytes for %d components", len(data), n)
+		return sc, malformed("SOS segment of %d bytes for %d components", len(data), n)
 	}
-	if n != len(f.comps) {
-		return unsupported("image split over several scans")
+	if n == 0 || n > len(f.comps) {
+		return sc, malformed("scan with %d components", n)
 	}
-	for i := range f.comps {
-		c := &f.comps[i]
-		if data[1+2*i] != c.id {
-			return malformed("scan components differ from the frame")
+	limit := byte(3)
+	if hd.baseline {
+		limit = 1
+	}
+	next := 0 // components come in frame order, each at most once
+	for i := range n {
+		id := data[1+2*i]
+		ci := slices.IndexFunc(f.comps[next:], func(c component) bool { return c.id == id })
+		if ci < 0 {
+			return sc, malformed("scan components differ from the frame")
 		}
+		ci += next
+		next = ci + 1
+		sc.comps = append(sc.comps, ci)
+		c := &f.comps[ci]
 		c.td, c.ta = data[2+2*i]>>4, data[2+2*i]&15
-		limit := byte(3)
-		if baseline {
-			limit = 1
-		}
 		if c.td > limit || c.ta > limit {
-			return malformed("Huffman table %d/%d", c.td, c.ta)
-		}
-		if hd.huff[0][c.td] == nil || hd.huff[1][c.ta] == nil {
-			return malformed("undefined Huffman table")
-		}
-		if hd.quant[c.tq] == nil {
-			return malformed("undefined quantization table %d", c.tq)
+			return sc, malformed("Huffman table %d/%d", c.td, c.ta)
 		}
 	}
-	if s := data[1+2*n:]; s[0] != 0 || s[1] != 63 || s[2] != 0 {
-		return malformed("spectral selection %d-%d, approximation 0x%02x in a sequential scan", s[0], s[1], s[2])
+	s := data[1+2*n:]
+	sc.ss, sc.se, sc.ah, sc.al = s[0], s[1], s[2]>>4, s[2]&15
+	if err := hd.progress(sc); err != nil {
+		return sc, err
+	}
+
+	// A DC first scan uses only DC tables, a DC refinement scan none and an
+	// AC scan only AC tables. Selectors for the others are ignored.
+	needDC := sc.ss == 0 && (!hd.progressive || sc.ah == 0)
+	needAC := sc.se > 0
+	for _, ci := range sc.comps {
+		c := &f.comps[ci]
+		if hd.quant[c.tq] == nil {
+			return sc, malformed("undefined quantization table %d", c.tq)
+		}
+		if needDC && hd.huff[0][c.td] == nil || needAC && hd.huff[1][c.ta] == nil {
+			return sc, malformed("undefined Huffman table")
+		}
+		if needDC {
+			hd.huffDefs[0][c.td].use()
+		}
+		if needAC {
+			hd.huffDefs[1][c.ta].use()
+		}
+	}
+	for _, c := range f.comps {
+		// Quantization tables can't change after the first scan, so every
+		// component's table is used from here on.
+		hd.quantDefs[c.tq].use()
+	}
+	hd.restartDefs.use()
+	return sc, nil
+}
+
+// progress checks that a scan codes only what no scan before it coded, in
+// the order ITU T.81 G.1.1.1.1 sets for progressive images, and records it.
+// Decoders differ on files that break these rules, so they fail closed.
+func (hd *header) progress(sc scan) error {
+	f := hd.frame
+	if !hd.progressive {
+		if sc.ss != 0 || sc.se != 63 || sc.ah != 0 || sc.al != 0 {
+			return malformed("spectral selection %d-%d, approximation 0x%x%x in a sequential scan", sc.ss, sc.se, sc.ah, sc.al)
+		}
+		for _, ci := range sc.comps {
+			if hd.coded[ci] {
+				return malformed("component %d in more than one scan", f.comps[ci].id)
+			}
+			hd.coded[ci] = true
+		}
+		return nil
+	}
+	switch {
+	case sc.se > 63 || sc.ss > sc.se:
+		return malformed("spectral selection %d-%d", sc.ss, sc.se)
+	case sc.ss == 0 && sc.se != 0:
+		return malformed("DC and AC coefficients in one progressive scan")
+	case sc.ss > 0 && len(sc.comps) != 1:
+		return malformed("progressive AC scan with %d components", len(sc.comps))
+	case sc.al > maxAl || sc.ah != 0 && sc.ah != sc.al+1:
+		return malformed("successive approximation 0x%x%x", sc.ah, sc.al)
+	}
+	want := int8(-1) // a first scan codes coefficients not coded yet
+	if sc.ah != 0 {
+		want = int8(sc.ah) //nolint:gosec // at most maxAl+1
+	}
+	for _, ci := range sc.comps {
+		bits := &hd.coefBits[ci]
+		if sc.ss > 0 && bits[0] < 0 {
+			return malformed("AC scan before the DC scan of component %d", f.comps[ci].id)
+		}
+		for k := sc.ss; k <= sc.se; k++ {
+			if bits[k] != want {
+				return malformed("coefficient %d of component %d coded out of order", k, f.comps[ci].id)
+			}
+			bits[k] = int8(sc.al)
+		}
 	}
 	return nil
 }
 
-// unused counts table definitions the scan doesn't use: replaced ones and
-// those no component refers to. Decoders never read them, so they can carry
-// anything.
-func (hd *header) unused() (quant, huff int) {
-	usedQ := map[byte]bool{}
-	usedH := [2]map[byte]bool{{}, {}}
-	for _, c := range hd.frame.comps {
-		usedQ[c.tq] = true
-		usedH[0][c.td], usedH[1][c.ta] = true, true
-	}
-	for i := range byte(4) {
-		quant += hd.quantDefs[i]
-		if usedQ[i] {
-			quant--
+// incomplete reports whether some coefficient was never coded in full.
+// Viewers show such progressive images smoothed, which a re-encoded file
+// can't reproduce.
+func (hd *header) incomplete() bool {
+	for ci := range hd.frame.comps {
+		if !hd.progressive && !hd.coded[ci] {
+			return true
 		}
-		for tc := range 2 {
-			huff += hd.huffDefs[tc][i]
-			if usedH[tc][i] {
-				huff--
-			}
+		if hd.progressive && slices.ContainsFunc(hd.coefBits[ci][:], func(b int8) bool { return b != 0 }) {
+			return true
 		}
 	}
-	return quant, huff
+	return false
+}
+
+// unused counts table definitions no scan used: replaced ones and those no
+// component refers to. Decoders never read them, so they can carry anything.
+func (hd *header) unused() (quant, huff, restart int) {
+	for i := range 4 {
+		quant += hd.quantDefs[i].count()
+		huff += hd.huffDefs[0][i].count() + hd.huffDefs[1][i].count()
+	}
+	return quant, huff, hd.restartDefs.count()
 }
 
 // colors decides whether the Adobe segment is kept. Decoders (libjpeg, Go)
@@ -438,11 +560,48 @@ func ceilDiv(a, b int) int {
 	return (a + b - 1) / b
 }
 
-// mcus returns the layout of the scan in MCUs. A single component is coded
-// block by block; several are interleaved in MCUs of hmax x vmax blocks.
+// mcus returns the layout of a scan of every component in MCUs. A single
+// component is coded block by block; several are interleaved in MCUs of
+// hmax x vmax blocks.
 func (f *frame) mcus() (across, down int) {
 	if len(f.comps) == 1 {
 		return f.comps[0].bw, f.comps[0].bh
 	}
 	return ceilDiv(f.width, 8*f.hmax), ceilDiv(f.height, 8*f.vmax)
+}
+
+// blocks calls fn for each block of a scan of comps, in coding order, and
+// start, if not nil, before each MCU with its index. A scan of one component
+// covers that component's blocks one by one; an interleaved scan covers
+// whole MCUs, including blocks outside the image.
+func (f *frame) blocks(comps []int, start func(mcu int) error, fn func(ci, bx, by int) error) error {
+	across, down := f.comps[comps[0]].bw, f.comps[comps[0]].bh
+	if len(comps) > 1 {
+		across, down = f.mcus()
+	}
+	for i := range across * down {
+		if start != nil {
+			if err := start(i); err != nil {
+				return err
+			}
+		}
+		mx, my := i%across, i/across
+		if len(comps) == 1 {
+			if err := fn(comps[0], mx, my); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, ci := range comps {
+			c := &f.comps[ci]
+			for y := range c.v {
+				for x := range c.h {
+					if err := fn(ci, mx*c.h+x, my*c.v+y); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
 }

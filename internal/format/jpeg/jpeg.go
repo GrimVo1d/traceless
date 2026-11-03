@@ -11,16 +11,18 @@
 // survives: padding bits, bytes after the data, restart markers, unused
 // table entries, or the content of blocks that lie outside the image.
 //
-// Everything is streamed, one MCU at a time. Every block costs at least two
-// bits of input, so work is bounded by the input size. Progressive,
-// arithmetic-coded, lossless, hierarchical and 12-bit files fail closed, as
-// do images split over several scans.
+// A sequential image coded in one scan is streamed, one MCU at a time.
+// Every block costs at least two bits of input, so work is bounded by the
+// input size. Progressive images and images split over several scans are
+// decoded into a coefficient buffer for the whole image (capped at
+// maxCoefBytes) and written as one sequential scan: their coefficients stay
+// the same too. Arithmetic-coded, lossless, hierarchical and 12-bit files
+// fail closed, as do progressive images that never finish coding some
+// coefficients, since viewers smooth those over.
 package jpeg
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"strings"
@@ -64,19 +66,19 @@ func (Handler) Strip(r io.Reader, w io.Writer) error {
 // bytes decoders skip) that can carry data through every check; only the
 // canonical form has none left.
 func (Handler) Verify(r io.Reader) error {
-	in, out := sha256.New(), sha256.New()
-	p := &processor{mode: modeVerify, out: bufio.NewWriter(out)}
-	if err := p.run(io.TeeReader(r, in)); err != nil {
-		return err
-	}
-	if err := p.out.Flush(); err != nil {
-		return err
-	}
-	if !bytes.Equal(in.Sum(nil), out.Sum(nil)) {
-		return fmt.Errorf("jpeg: %w: headers or image coding differ from a stripped file", format.ErrMetadataRemains)
-	}
-	return nil
+	return format.VerifyFixedPoint(r, errNotStripped, func(in io.Reader, out io.Writer) error {
+		p := &processor{mode: modeVerify, out: bufio.NewWriter(out)}
+		if err := p.run(in); err != nil {
+			return err
+		}
+		return p.out.Flush()
+	})
 }
+
+// errNotStripped is what Verify returns for a file that holds no metadata
+// Inspect can name but isn't what Strip writes. Progressive files always
+// get it, since Strip writes sequential ones.
+var errNotStripped = fmt.Errorf("jpeg: %w: headers or image coding differ from a stripped file", format.ErrMetadataRemains)
 
 type mode int
 
@@ -96,9 +98,12 @@ type processor struct {
 	hdr     header
 	report  format.Report
 	stats   stats
-	scanned bool // the scan was read
-	sawEXIF bool // an EXIF segment was decoded for Inspect
-	sawXMP  bool // an XMP segment was shown for Inspect
+	br      *bitReader
+	scanned bool   // a scan was read
+	scans   int    // scans read
+	coefs   *coefs // the image, if it isn't streamed
+	sawEXIF bool   // an EXIF segment was decoded for Inspect
+	sawXMP  bool   // an XMP segment was shown for Inspect
 }
 
 func (p *processor) run(r io.Reader) error {
@@ -122,10 +127,18 @@ func (p *processor) run(r io.Reader) error {
 	if !p.scanned {
 		return malformed("no image data")
 	}
+	if p.hdr.incomplete() {
+		return unsupported("image data stops before every coefficient is coded in full")
+	}
 
 	n, image, err := mr.trailing()
 	if err != nil {
 		return err
+	}
+	if p.coefs != nil {
+		if err := p.rebuild(); err != nil {
+			return err
+		}
 	}
 	if err := p.hidden(); err != nil {
 		return err
@@ -158,16 +171,14 @@ func (p *processor) marker(m byte) error {
 		return malformed("SOI inside the file")
 	case m >= markerRST0 && m <= markerRST7:
 		return malformed("%s outside the image data", markerName(m))
-	case p.scanned:
-		// Only metadata and EOI may follow the one supported scan.
-		return unsupported("%s after the image data", markerName(m))
-	case m == markerSOF2:
-		return unsupported("progressive JPEG")
 	case m == markerDAC:
 		return unsupported("arithmetic coding")
 	case m == markerDNL:
 		return unsupported("DNL marker")
-	case m != markerDQT && m != markerDHT && m != markerDRI && m != markerSOF0 && m != markerSOF1 && m != markerSOS:
+	case m == markerDQT && p.scanned:
+		// libjpeg keeps the tables of the first scan, Go uses the last.
+		return unsupported("quantization table defined between scans")
+	case m != markerDQT && m != markerDHT && m != markerDRI && m != markerSOF0 && m != markerSOF1 && m != markerSOF2 && m != markerSOS:
 		// Other frame types (lossless, hierarchical, arithmetic) and
 		// reserved markers.
 		return unsupported("%s", markerName(m))
@@ -184,12 +195,8 @@ func (p *processor) marker(m byte) error {
 		return p.hdr.parseDHT(data)
 	case markerDRI:
 		return p.hdr.parseDRI(data)
-	case markerSOF0, markerSOF1:
-		if err := p.hdr.parseSOF(data); err != nil {
-			return err
-		}
-		p.hdr.baseline = m == markerSOF0
-		return nil
+	case markerSOF0, markerSOF1, markerSOF2:
+		return p.hdr.parseSOF(m, data)
 	}
 	return p.scan(data)
 }
@@ -199,11 +206,18 @@ func (p *processor) marker(m byte) error {
 // metadata.
 func (p *processor) app(m byte, data []byte) error {
 	hd := &p.hdr
+	isJFIF := m == markerAPP0 && len(data) >= jfifLen && strings.HasPrefix(string(data), prefixJFIF)
+	isAdobe := m == markerAPP0+14 && len(data) >= adobeLen && strings.HasPrefix(string(data), prefixAdobe)
 	if p.scanned {
+		if isJFIF || isAdobe {
+			// libjpeg sets the colors before the first scan; Go reads
+			// these segments up to EOI.
+			return unsupported("%s after the first scan", label(m, data))
+		}
 		return p.drop(m, data)
 	}
 	switch {
-	case m == markerAPP0 && len(data) >= jfifLen && strings.HasPrefix(string(data), prefixJFIF):
+	case isJFIF:
 		if hd.jfif != nil {
 			return malformed("duplicate JFIF segment")
 		}
@@ -222,7 +236,7 @@ func (p *processor) app(m byte, data []byte) error {
 		}
 		return nil
 
-	case m == markerAPP0+14 && len(data) >= adobeLen && strings.HasPrefix(string(data), prefixAdobe):
+	case isAdobe:
 		if hd.adobe != nil {
 			return malformed("duplicate Adobe segment")
 		}
@@ -249,111 +263,198 @@ func (p *processor) app(m byte, data []byte) error {
 	return p.drop(m, data)
 }
 
-// scan reads the scan header and image data. Unless inspecting, it writes
-// the rebuilt headers first, then the re-encoded data.
+// scan reads a scan header and the image data after it.
 func (p *processor) scan(data []byte) error {
 	hd := &p.hdr
-	if err := hd.parseSOS(data, hd.baseline); err != nil {
-		return err
+	if p.scans++; p.scans > maxScans {
+		return unsupported("more than %d scans", maxScans)
 	}
-	p.scanned = true
-	if hd.restartDefs > 1 {
-		if err := p.found("Hidden data", fmt.Sprintf("%d unused restart intervals", hd.restartDefs-1)); err != nil {
-			return err
-		}
-	}
-	quant, huff := hd.unused()
-	if quant > 0 {
-		if err := p.found("Hidden data", fmt.Sprintf("%d unused quantization tables", quant)); err != nil {
-			return err
-		}
-	}
-	if huff > 0 {
-		if err := p.found("Hidden data", fmt.Sprintf("%d unused Huffman tables", huff)); err != nil {
-			return err
-		}
-	}
-	unusedAdobe, err := hd.colors()
+	sc, err := hd.parseSOS(data)
 	if err != nil {
 		return err
 	}
-	if unusedAdobe {
-		if err := p.found("Adobe segment", "color transform unused for this image"); err != nil {
+	if !p.scanned {
+		p.scanned = true
+		unusedAdobe, err := hd.colors()
+		if err != nil {
+			return err
+		}
+		if unusedAdobe {
+			if err := p.found("Adobe segment", "color transform unused for this image"); err != nil {
+				return err
+			}
+		}
+		if !hd.progressive && len(sc.comps) == len(hd.frame.comps) {
+			return p.stream(sc)
+		}
+		if p.mode == modeVerify {
+			// Strip writes one sequential scan, so this file can't be
+			// what it writes.
+			return errNotStripped
+		}
+		if p.coefs, err = newCoefs(hd.frame); err != nil {
 			return err
 		}
 	}
+	return p.buffer(sc)
+}
 
-	var bw *bitWriter
+// encState is the state of the re-encoded scan.
+type encState struct {
+	bw   *bitWriter // nil when only checking
+	pred [4]int32   // DC value of the previous block, per component
+	last [4]int32   // DC value of the previous block in the MCU, per component
+}
+
+// emit passes one block of the rebuilt image to the encoder. A block that
+// lies entirely outside the image is never shown; encoders fill it like
+// libjpeg does, with no AC and the DC of the previous block, and anything
+// else in it is counted as hidden data and replaced.
+func (p *processor) emit(es *encState, ci int, outside bool, blk *block) {
+	if outside {
+		filler := block{es.last[ci]}
+		if *blk != filler {
+			p.stats.dummy++
+			*blk = filler
+		}
+	}
+	es.last[ci] = blk[0]
+	if es.bw != nil {
+		enc := 2 * min(ci, 1)
+		es.bw.encodeBlock(stdEncoders[enc], stdEncoders[enc+1], &es.pred[ci], blk)
+	}
+}
+
+// stream decodes the one scan of a sequential image MCU by MCU and, unless
+// inspecting, writes the rebuilt headers and encodes each block again right
+// away.
+func (p *processor) stream(sc scan) error {
+	hd := &p.hdr
+	var es encState
 	if p.out != nil {
 		if err := hd.write(p.out); err != nil {
 			return err
 		}
-		bw = &bitWriter{w: p.out}
+		es.bw = &bitWriter{w: p.out}
 	}
-	if err := p.data(bw); err != nil {
+	var blk block
+	err := p.decode(sc, func(ci, bx, by int, pred *int32, _ *int32) error {
+		c := &hd.frame.comps[ci]
+		if err := p.br.decodeBlock(hd.huff[0][c.td], hd.huff[1][c.ta], pred, &blk); err != nil {
+			return err
+		}
+		p.emit(&es, ci, bx >= c.bw || by >= c.bh, &blk)
+		return nil
+	})
+	if err != nil {
 		return err
 	}
-	if bw != nil {
-		bw.flush()
+	if es.bw != nil {
+		es.bw.flush()
 	}
 	return nil
 }
 
-// data decodes the entropy-coded data MCU by MCU and, if bw is not nil,
-// encodes it again.
-func (p *processor) data(bw *bitWriter) error {
-	f, hd := p.hdr.frame, &p.hdr
-	br := &bitReader{r: p.mr.r}
-	across, down := f.mcus()
-	total := across * down
-	var decPred, encPred [4]int32
+// buffer decodes one scan into the coefficient buffer.
+func (p *processor) buffer(sc scan) error {
+	hd := &p.hdr
 	var blk block
-
-	for i := range total {
-		if ri := hd.restart; ri > 0 && i > 0 && i%ri == 0 {
-			m, err := br.end(&p.stats)
-			if err != nil {
+	return p.decode(sc, func(ci, bx, by int, pred, eobrun *int32) error {
+		c := &hd.frame.comps[ci]
+		coef, end := p.coefs.comps[ci].block(bx, by)
+		dc, ac := hd.huff[0][c.td], hd.huff[1][c.ta]
+		switch {
+		case !hd.progressive:
+			if err := p.br.decodeBlock(dc, ac, pred, &blk); err != nil {
 				return err
 			}
-			if want := byte(markerRST0 + (i/ri-1)%8); m != want {
-				return malformed("%s where %s was expected", markerName(m), markerName(want))
+			for k, v := range blk {
+				coef[k] = int16(v) //nolint:gosec // decodeBlock checks the range
 			}
-			decPred = [4]int32{}
+			return nil
+		case sc.ss == 0 && sc.ah == 0:
+			return p.br.decodeDCFirst(dc, pred, sc.al, coef)
+		case sc.ss == 0:
+			return p.br.decodeDCRefine(sc.al, coef)
+		case sc.ah == 0:
+			return p.br.decodeACFirst(ac, sc.ss, sc.se, sc.al, eobrun, coef, end)
 		}
-		mx, my := i%across, i/across
-		for ci := range f.comps {
-			c := &f.comps[ci]
-			dc, ac := hd.huff[0][c.td], hd.huff[1][c.ta]
-			h, v := c.h, c.v
-			if len(f.comps) == 1 {
-				h, v = 1, 1
-			}
-			var last int32
-			for y := range v {
-				for x := range h {
-					if err := br.decodeBlock(dc, ac, &decPred[ci], &blk); err != nil {
-						return err
-					}
-					if mx*h+x >= c.bw || my*v+y >= c.bh {
-						// A block entirely outside the image is never
-						// shown. Encoders fill it like libjpeg does: no
-						// AC, the DC of the previous block.
-						filler := block{last}
-						if blk != filler {
-							p.stats.dummy++
-							blk = filler
-						}
-					}
-					last = blk[0]
-					if bw != nil {
-						enc := 2 * min(ci, 1)
-						bw.encodeBlock(stdEncoders[enc], stdEncoders[enc+1], &encPred[ci], &blk)
-					}
-				}
-			}
+		return p.br.decodeACRefine(ac, sc.ss, sc.se, sc.al, eobrun, coef, end)
+	})
+}
+
+// rebuild encodes the coefficient buffer as one sequential scan, after the
+// rebuilt headers. When inspecting, it only checks the blocks outside the
+// image.
+func (p *processor) rebuild() error {
+	f := p.hdr.frame
+	var es encState
+	if p.out != nil {
+		if err := p.hdr.write(p.out); err != nil {
+			return err
 		}
+		es.bw = &bitWriter{w: p.out}
 	}
-	m, err := br.end(&p.stats)
+	all := make([]int, len(f.comps))
+	for i := range all {
+		all[i] = i
+	}
+	var blk block
+	err := f.blocks(all, nil, func(ci, bx, by int) error {
+		c := &f.comps[ci]
+		outside := bx >= c.bw || by >= c.bh
+		blk = block{}
+		if coef := p.coefs.comps[ci].peek(bx, by); coef != nil {
+			for k, v := range coef {
+				blk[k] = int32(v)
+			}
+		}
+		if outside && blk == (block{}) {
+			// Not coded at all: single-component scans skip these blocks.
+			blk[0] = es.last[ci]
+		}
+		p.emit(&es, ci, outside, &blk)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if es.bw != nil {
+		es.bw.flush()
+	}
+	return nil
+}
+
+// decode walks the entropy-coded data of a scan, calling fn for each block
+// with the DC predictor and end-of-band run of its component. It handles
+// restart markers and leaves the marker after the data pending.
+func (p *processor) decode(sc scan, fn func(ci, bx, by int, pred, eobrun *int32) error) error {
+	hd := &p.hdr
+	p.br = &bitReader{r: p.mr.r}
+	var preds [4]int32
+	var eobrun int32
+	restart := func(i int) error {
+		ri := hd.restart
+		if ri == 0 || i == 0 || i%ri != 0 {
+			return nil
+		}
+		m, err := p.br.end(&p.stats)
+		if err != nil {
+			return err
+		}
+		if want := byte(markerRST0 + (i/ri-1)%8); m != want {
+			return malformed("%s where %s was expected", markerName(m), markerName(want))
+		}
+		preds, eobrun = [4]int32{}, 0
+		return nil
+	}
+	err := hd.frame.blocks(sc.comps, restart, func(ci, bx, by int) error {
+		return fn(ci, bx, by, &preds[ci], &eobrun)
+	})
+	if err != nil {
+		return err
+	}
+	m, err := p.br.end(&p.stats)
 	if err != nil {
 		return err
 	}
@@ -377,6 +478,16 @@ func (p *processor) hidden() error {
 	}
 	if st.dummy > 0 {
 		items = append(items, fmt.Sprintf("%d blocks outside the visible image carry data", st.dummy))
+	}
+	quant, huff, restart := p.hdr.unused()
+	if quant > 0 {
+		items = append(items, fmt.Sprintf("%d unused quantization tables", quant))
+	}
+	if huff > 0 {
+		items = append(items, fmt.Sprintf("%d unused Huffman tables", huff))
+	}
+	if restart > 0 {
+		items = append(items, fmt.Sprintf("%d unused restart intervals", restart))
 	}
 	for _, it := range items {
 		if err := p.found("Hidden data", it); err != nil {
