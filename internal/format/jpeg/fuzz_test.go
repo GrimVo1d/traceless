@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"traceless/internal/format"
+	"traceless/internal/format/icc"
 )
 
 // FuzzHandler feeds arbitrary bytes to every handler method. Nothing may
@@ -24,6 +25,8 @@ func FuzzHandler(f *testing.F) {
 	f.Add(built{width: 33, height: 7, sampling: []byte{0x21, 0x11, 0x11}, segs: [][]byte{app(14, adobeData(0, ""))}}.bytes())
 	f.Add(built{width: 8, height: 8, sampling: []byte{0x11, 0x11, 0x11, 0x11}, segs: [][]byte{app(14, adobeData(2, ""))}}.bytes())
 	f.Add(withSegments(baseJPEG(f), app(0, jfifData(1, 1, "x")), app(1, string(orientationSegment(6)))))
+	f.Add(withSegments(baseJPEG(f), iccSegments(vendorP3, 2, 1)...))
+	f.Add(withSegments(baseJPEG(f), app(2, string(iccData(icc.AdobeRGB)))))
 	for _, name := range []string{"prog-custom.jpg", "prog-restart.jpg", "prog-gray.jpg", "prog-cmyk.jpg", "multiscan-pair.jpg"} {
 		b, err := os.ReadFile(filepath.Join("testdata", "scans", name))
 		if err != nil {

@@ -27,14 +27,19 @@ package png
 import (
 	"bufio"
 	"bytes"
+	"compress/zlib"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/adler32"
 	"io"
 	"slices"
 	"strings"
+	"sync"
 
 	"traceless/internal/format"
 	"traceless/internal/format/exif"
+	"traceless/internal/format/icc"
 )
 
 // Handler handles PNG files.
@@ -101,6 +106,7 @@ type processor struct {
 	report      format.Report
 	pending     []pendingChunk // color space chunks not yet written
 	sawEXIF     bool           // an eXIf chunk was seen
+	sawICCP     bool           // an iCCP chunk was seen
 	orientation int            // EXIF orientation to keep, 0 if none
 
 	// Palette images: PLTE, tRNS and bKGD are made canonical once the image
@@ -217,6 +223,9 @@ func (p *processor) chunk(h chunkHeader) error {
 
 	case h.Type == "eXIf" && !p.sawEXIF:
 		return p.exif(h)
+
+	case h.Type == "iCCP" && !p.sawICCP:
+		return p.iccp(h)
 
 	case renderingChunks[h.Type]:
 		return p.rendering(h)
@@ -496,8 +505,131 @@ func orientationChunk(o int) []byte {
 	return exif.OrientationOnly(uint16(o)) //nolint:gosec // o is 2 to 8
 }
 
+// iccp handles the first iCCP chunk; libpng ignores later ones. A profile
+// of a color space package icc knows is replaced: by an sRGB chunk for
+// sRGB, by our own profile for the others, which is then a color space
+// chunk like sRGB. Other profiles are dropped, and viewers fall back to
+// sRGB, cHRM or gAMA.
+func (p *processor) iccp(h chunkHeader) error {
+	p.sawICCP = true
+	l := &p.layout
+	if l.sawImage || l.sawPalette || h.Length > maxChunkRead ||
+		l.hdr.colorType == colorGray || l.hdr.colorType == colorGrayAlpha {
+		// Decoders ignore a misplaced iCCP and an RGB profile for a gray
+		// image; a profile this large holds lookup tables.
+		return p.drop(h)
+	}
+	if err := p.budget.Hold(int64(h.Length)); err != nil {
+		return err
+	}
+	defer p.budget.Release(int64(h.Length))
+	data, err := p.cr.ReadAll(h)
+	if err != nil {
+		return err
+	}
+	space, err := p.profileSpace(data)
+	if err != nil {
+		return err
+	}
+
+	var kept *pendingChunk
+	switch space {
+	case icc.SRGB:
+		if !l.seen["sRGB"] {
+			l.seen["sRGB"] = true // a later sRGB chunk is a duplicate
+			kept = &pendingChunk{chunkHeader{Type: "sRGB", Length: 1}, []byte{0}}
+		}
+	case icc.DisplayP3, icc.AdobeRGB:
+		ours := canonicalICCP()[space]
+		kept = &pendingChunk{chunkHeader{Type: "iCCP", Length: uint32(len(ours))}, ours} //nolint:gosec // a few hundred bytes
+		if bytes.Equal(data, ours) {
+			p.pending = append(p.pending, *kept)
+			return nil
+		}
+	}
+	if err := p.dropFrom(h, bytes.NewReader(data)); err != nil {
+		return err
+	}
+	if kept != nil {
+		p.pending = append(p.pending, *kept)
+	}
+	return nil
+}
+
+// inflaterMemory is roughly what a zlib reader allocates at its peak: its
+// 32 KB window and the Huffman tables of a dynamic block (~45 KB).
+const inflaterMemory = 96 << 10
+
+// profileSpace decompresses the profile of an iCCP chunk (name, NUL,
+// method, zlib data) and identifies its color space. A chunk that doesn't
+// decode, or a profile over icc.MaxSize, is icc.Unknown; only budget and
+// read errors are returned.
+func (p *processor) profileSpace(data []byte) (icc.Space, error) {
+	_, rest, ok := bytes.Cut(data, []byte{0})
+	if !ok || len(rest) < 1 || rest[0] != 0 {
+		return icc.Unknown, nil
+	}
+	if err := p.budget.Hold(inflaterMemory); err != nil {
+		return icc.Unknown, err
+	}
+	defer p.budget.Release(inflaterMemory)
+	zr, err := zlib.NewReader(bytes.NewReader(rest[1:]))
+	if err != nil {
+		return icc.Unknown, nil // not a zlib stream: not a profile we know
+	}
+	profile := format.NewBuffer(p.budget)
+	defer profile.Release()
+	var b [4096]byte
+	for {
+		n, err := zr.Read(b[:])
+		if n > 0 {
+			if err := p.budget.Inflate(int64(n)); err != nil {
+				return icc.Unknown, err
+			}
+			if profile.Len()+n > icc.MaxSize {
+				return icc.Unknown, nil
+			}
+			if _, err := profile.Write(b[:n]); err != nil {
+				return icc.Unknown, err
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return icc.Identify(profile.Bytes()), nil
+		}
+		if err != nil {
+			return icc.Unknown, nil // a broken stream: not a profile we know
+		}
+	}
+}
+
+// canonicalICCP holds the iCCP chunk data Strip writes for each color
+// space: its name as the profile name, and our profile in a zlib stream of
+// one stored block. Verify needs the same bytes from every build, so they
+// don't come from compress/flate, whose output can change between Go
+// releases; compressing would save ~200 bytes.
+var canonicalICCP = sync.OnceValue(func() map[icc.Space][]byte {
+	m := map[icc.Space][]byte{}
+	for _, s := range []icc.Space{icc.DisplayP3, icc.AdobeRGB} {
+		profile := icc.Profile(s)
+		n := uint16(len(profile))
+		b := append([]byte(s.String()), 0, 0) // NUL, method 0 (zlib)
+		b = append(b, 0x78, 0x01)             // deflate, 32 KB window, no dictionary
+		b = append(b, 1)                      // final block, stored
+		b = binary.LittleEndian.AppendUint16(b, n)
+		b = binary.LittleEndian.AppendUint16(b, ^n)
+		b = append(b, profile...)
+		m[s] = binary.BigEndian.AppendUint32(b, adler32.Checksum(profile))
+	}
+	return m
+})
+
 // drop handles an ancillary chunk that is never kept.
 func (p *processor) drop(h chunkHeader) error {
+	return p.dropFrom(h, p.cr.Data())
+}
+
+// dropFrom is drop for a chunk whose data r reads.
+func (p *processor) dropFrom(h chunkHeader, r io.Reader) error {
 	switch p.mode {
 	case modeVerify:
 		return fmt.Errorf("png: %w: %s chunk", format.ErrMetadataRemains, h.Type)
@@ -510,7 +642,7 @@ func (p *processor) drop(h chunkHeader) error {
 		if p.text == nil {
 			p.text = &textDecoder{budget: p.budget}
 		}
-		f, grouped, err := p.text.describe(h, p.cr.Data())
+		f, grouped, err := p.text.describe(h, r)
 		if err != nil {
 			return err
 		}

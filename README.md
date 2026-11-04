@@ -124,8 +124,9 @@ tag, so rotated photos still display upright.
 ## Limitations
 
 - Animated PNG (APNG) and arithmetic-coded JPEG are refused for now.
-- ICC color profiles are removed, so wide-gamut images (e.g. Display P3
-  screenshots) can look slightly different.
+- ICC color profiles are replaced: sRGB, Display P3 and Adobe RGB profiles
+  by a canonical one with the same colors, others removed, so images in
+  other color spaces (e.g. ProPhoto RGB) can look slightly different.
 - JPEG image data is re-encoded losslessly with the standard Huffman tables:
   the pixels stay identical, but files that used optimized tables grow by
   about 5-10%. Progressive JPEGs come out as baseline ones.

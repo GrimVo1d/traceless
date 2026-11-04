@@ -140,8 +140,9 @@ func span(size, start, step uint32) uint32 {
 // ancillary chunk is dropped, including some that look harmless:
 //
 //   - iCCP: ICC profiles carry descriptions, copyright strings and creation
-//     dates that can identify a device or editing software. Viewers fall
-//     back to sRGB, cHRM or gAMA.
+//     dates that can identify a device or editing software. A profile of a
+//     space package icc knows is replaced by ours (see iccp); viewers fall
+//     back to sRGB, cHRM or gAMA for the others.
 //   - pHYs: the pixel density only sets the print size, and values such as
 //     144 dpi identify the device (Retina screenshots).
 //   - sBIT: the original sample depth reveals the source; viewers don't need it.
@@ -299,15 +300,20 @@ func uints(data []byte, size int) []uint32 {
 }
 
 // overridden returns why a buffered color space chunk is unused given the
-// others, or "". cICP takes priority over sRGB, which takes priority over
-// gAMA and cHRM; mDCV and cLLI only apply together with cICP.
+// others, or "". cICP takes priority over iCCP, then sRGB, then gAMA and
+// cHRM (PNG third edition, 4.3); mDCV and cLLI only apply together with
+// cICP. The spec says iCCP and sRGB shouldn't both be there, and libpng
+// uses whichever comes first; keeping only iCCP makes every viewer agree.
 func overridden(typ string, present map[string]bool) string {
 	switch typ {
-	case "sRGB", "gAMA", "cHRM":
+	case "iCCP", "sRGB", "gAMA", "cHRM":
 		if present["cICP"] {
 			return "overridden by cICP"
 		}
-		if typ != "sRGB" && present["sRGB"] {
+		if typ != "iCCP" && present["iCCP"] {
+			return "overridden by iCCP"
+		}
+		if typ != "iCCP" && typ != "sRGB" && present["sRGB"] {
 			return "overridden by sRGB"
 		}
 	case "mDCV", "cLLI":

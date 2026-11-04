@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"traceless/internal/format/exif"
+	"traceless/internal/format/icc"
 )
 
 const (
@@ -71,9 +72,10 @@ type header struct {
 	restart     int // restart interval in MCUs, 0 for none
 	restartDefs defs
 	jfif        *jfif
-	adobe       *byte // Adobe color transform
-	sawEXIF     bool  // the first EXIF segment was seen
-	orientation int   // its Orientation tag, 0 if none
+	adobe       *byte     // Adobe color transform
+	sawEXIF     bool      // the first EXIF segment was seen
+	orientation int       // its Orientation tag, 0 if none
+	icc         icc.Space // the profile's color space, if we write one for it
 
 	// Decided by colors.
 	keepAdobe bool
@@ -446,6 +448,23 @@ func isOrientationSegment(data []byte, o int) bool {
 	return o >= 2 && bytes.Equal(data, orientationSegment(o))
 }
 
+// iccData returns the APP2 data stripped files carry for color space s: our
+// profile in one segment.
+func iccData(s icc.Space) []byte {
+	return append([]byte(prefixICC+"\x01\x01"), icc.Profile(s)...)
+}
+
+// isOurICC reports whether data is exactly what Strip writes for some
+// color space: then it carries nothing else.
+func isOurICC(data []byte) bool {
+	for _, s := range []icc.Space{icc.DisplayP3, icc.AdobeRGB} {
+		if bytes.Equal(data, iccData(s)) {
+			return true
+		}
+	}
+	return false
+}
+
 // write writes the rebuilt headers of a stripped file, everything from SOI
 // to the scan header. Every part is built from parsed values.
 func (hd *header) write(w io.Writer) error {
@@ -462,6 +481,9 @@ func (hd *header) write(w io.Writer) error {
 	}
 	if hd.orientation >= 2 {
 		b = appendSegment(b, markerAPP0+1, orientationSegment(hd.orientation))
+	}
+	if hd.icc != icc.Unknown {
+		b = appendSegment(b, markerAPP0+2, iccData(hd.icc))
 	}
 	if hd.keepAdobe {
 		// Version 100 and no flags, as libjpeg writes it.

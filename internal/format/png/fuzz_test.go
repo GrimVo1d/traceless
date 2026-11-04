@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"traceless/internal/format"
+	"traceless/internal/format/icc"
 )
 
 // FuzzHandler feeds arbitrary bytes to every handler method. Nothing may
@@ -26,6 +27,9 @@ func FuzzHandler(f *testing.F) {
 	f.Add(paddingPNG())
 	f.Add(palettePNG())
 	f.Add(interlacedPNG())
+	f.Add(pngOf(ihdr, iccpChunk("x", vendorP3), encodeChunk("sRGB", []byte{0}), idat, iendChunk))
+	f.Add(pngOf(ihdr, encodeChunk("iCCP", canonicalICCP()[icc.AdobeRGB]), idat, iendChunk))
+	f.Add(pngOf(ihdr, iccpChunk("x", vendorSRGB), idat, iendChunk))
 	f.Add(pngOf(ihdr, encodeChunk("gAMA", []byte{0, 0, 0xb1, 0x8f}), encodeChunk("cHRM", srgbChromaticities()),
 		encodeChunk("sRGB", []byte{0}), encodeChunk("cICP", []byte{9, 16, 0, 1}),
 		encodeChunk("mDCV", validMDCV()), encodeChunk("cLLI", make([]byte, 8)),

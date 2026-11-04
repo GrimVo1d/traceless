@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"traceless/internal/format"
+	"traceless/internal/format/icc"
 )
 
 // Handler handles JPEG files.
@@ -108,6 +109,12 @@ type processor struct {
 	coefs   *coefs // the image, if it isn't streamed
 	sawEXIF bool   // an EXIF segment was decoded for Inspect
 	sawXMP  bool   // an XMP segment was shown for Inspect
+
+	// ICC profile segments before the first scan (see iccSegment).
+	iccParts  [][]byte
+	iccHeld   int64  // memory held for them
+	iccBroken bool   // too large to use
+	iccOurs   []byte // our own segment, which passed unreported
 }
 
 func (p *processor) run(r io.Reader) error {
@@ -115,6 +122,7 @@ func (p *processor) run(r io.Reader) error {
 		if p.coefs != nil {
 			p.coefs.release()
 		}
+		p.releaseICC()
 	}()
 	mr, err := newMarkerReader(r)
 	if err != nil {
@@ -259,6 +267,9 @@ func (p *processor) app(m byte, data []byte) error {
 		}
 		return nil
 
+	case m == markerAPP0+2 && strings.HasPrefix(string(data), prefixICC):
+		return p.iccSegment(data)
+
 	case m == markerAPP0+1 && !hd.sawEXIF && strings.HasPrefix(string(data), prefixEXIF):
 		// Viewers rotate the image by the first EXIF segment. Its
 		// orientation is kept; the segment itself only if it holds
@@ -284,6 +295,9 @@ func (p *processor) scan(data []byte) error {
 	}
 	if !p.scanned {
 		p.scanned = true
+		if err := p.identifyICC(); err != nil {
+			return err
+		}
 		unusedAdobe, err := hd.colors()
 		if err != nil {
 			return err
@@ -544,6 +558,93 @@ func (p *processor) hidden() error {
 		}
 	}
 	return nil
+}
+
+// iccSegment handles a segment of an ICC profile before the first scan,
+// where libjpeg reads profiles. The parts are collected, and at the first
+// scan a profile of a color space package icc knows is replaced by ours
+// (see identifyICC). Our own segment passes as it is, until identifyICC
+// finds it isn't kept; anything else is reported like a dropped segment.
+func (p *processor) iccSegment(data []byte) error {
+	ours := len(p.iccParts) == 0 && !p.iccBroken && isOurICC(data)
+	switch {
+	case p.iccBroken:
+	case len(data) < len(prefixICC)+2:
+		// No room for the sequence number and count: libjpeg skips it.
+	case p.iccHeld+int64(len(data)) > icc.MaxSize:
+		// Too large for a matrix profile.
+		p.releaseICC()
+		p.iccBroken = true
+	default:
+		if err := p.budget.Hold(int64(len(data))); err != nil {
+			return err
+		}
+		p.iccHeld += int64(len(data))
+		p.iccParts = append(p.iccParts, data)
+	}
+	if ours {
+		p.iccOurs = data
+		return nil
+	}
+	return p.drop(markerAPP0+2, data)
+}
+
+// identifyICC puts the profile parts together like libjpeg's
+// jpeg_read_icc_profile (each sequence number from 1 to the count once) and
+// keeps its color space if it is one we write a profile for. sRGB needs
+// none, and an RGB profile applies only to three components. Our own
+// segment, if it isn't kept, is reported now.
+func (p *processor) identifyICC() error {
+	defer p.releaseICC()
+	s, err := p.assembleICC()
+	if err != nil {
+		return err
+	}
+	if icc.Profile(s) != nil {
+		p.hdr.icc = s
+		return nil
+	}
+	if p.iccOurs != nil {
+		return p.drop(markerAPP0+2, p.iccOurs)
+	}
+	return nil
+}
+
+// assembleICC identifies the profile the parts make up, or returns
+// icc.Unknown if they don't make one up.
+func (p *processor) assembleICC() (icc.Space, error) {
+	if p.iccBroken || len(p.iccParts) == 0 || len(p.hdr.frame.comps) != 3 {
+		return icc.Unknown, nil
+	}
+	n := len(prefixICC)
+	count := int(p.iccParts[0][n+1])
+	if count != len(p.iccParts) {
+		return icc.Unknown, nil
+	}
+	ordered := make([][]byte, count)
+	size := 0
+	for _, part := range p.iccParts {
+		seq := int(part[n])
+		if seq == 0 || seq > count || int(part[n+1]) != count || ordered[seq-1] != nil {
+			return icc.Unknown, nil
+		}
+		ordered[seq-1] = part[n+2:]
+		size += len(part) - n - 2
+	}
+	if err := p.budget.Hold(int64(size)); err != nil {
+		return icc.Unknown, err
+	}
+	defer p.budget.Release(int64(size))
+	profile := make([]byte, 0, size)
+	for _, part := range ordered {
+		profile = append(profile, part...)
+	}
+	return icc.Identify(profile), nil
+}
+
+func (p *processor) releaseICC() {
+	p.budget.Release(p.iccHeld)
+	p.iccParts, p.iccHeld, p.iccOurs = nil, 0, nil
 }
 
 // drop handles a segment that is never kept.
