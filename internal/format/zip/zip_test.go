@@ -267,7 +267,10 @@ func TestNames(t *testing.T) {
 		"folders in other cases":  rawZIP("", rawEntry{name: "D/a.png", data: img}, rawEntry{name: "d/b.png", data: img}),
 		"dots inside names":       rawZIP("", rawEntry{name: "a..b/.x.png", data: img}),
 		"UTF-8":                   rawZIP("", rawEntry{name: "фото/café.png", data: img, flags: flagUTF8}),
-		"device-like names":       rawZIP("", rawEntry{name: "console/com10.png", data: img}),
+		"NFD name":                rawZIP("", rawEntry{name: "cafe\u0301.png", data: img, flags: flagUTF8}),
+		"folders in other normalizations": rawZIP("", rawEntry{name: "caf\u00e9/a.png", data: img, flags: flagUTF8},
+			rawEntry{name: "cafe\u0301/b.png", data: img, flags: flagUTF8}),
+		"device-like names": rawZIP("", rawEntry{name: "console/com10.png", data: img}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			out := stripWith(t, handler(), z)
@@ -415,6 +418,9 @@ func TestUnsupported(t *testing.T) {
 		{"trailing dot", rawZIP("", rawEntry{name: "a.png.", data: img})},
 		{"trailing space", rawZIP("", rawEntry{name: "d /a.png", data: img})},
 		{"names differing in case", rawZIP("", rawEntry{name: "A.png", data: img}, rawEntry{name: "a.png", data: img})},
+		{"names differing in normalization", rawZIP("", rawEntry{name: "caf\u00e9.png", data: img, flags: flagUTF8}, rawEntry{name: "cafe\u0301.png", data: img, flags: flagUTF8})},
+		{"Hangul syllable and its letters", rawZIP("", rawEntry{name: "\uac00.png", data: img, flags: flagUTF8}, rawEntry{name: "\u1100\u1161.png", data: img, flags: flagUTF8})},
+		{"normalization and case", rawZIP("", rawEntry{name: "caf\u00e9/a.png", data: img, flags: flagUTF8}, rawEntry{name: "CAFE\u0301", data: img, flags: flagUTF8})},
 		{"file and folder", rawZIP("", rawEntry{name: "d", data: img}, rawEntry{name: "d/", stored: true, external: 0o40755 << 16})},
 		{"file, then a file in it", rawZIP("", rawEntry{name: "d", data: img}, rawEntry{name: "D/a.png", data: img})},
 		{"file in a folder, then the folder as a file", rawZIP("", rawEntry{name: "d/e/a.png", data: img}, rawEntry{name: "d/e", data: img})},

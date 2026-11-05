@@ -151,4 +151,5 @@ go test ./...
 go test ./internal/format/png -run '^$' -fuzz FuzzHandler -fuzztime 60s
 ```
 
-Pure Go standard library, no dependencies.
+Pure Go: the standard library plus golang.org/x/text, for Unicode
+normalization of ZIP entry names.

@@ -43,6 +43,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"golang.org/x/text/unicode/norm"
+
 	"traceless/internal/format"
 )
 
@@ -740,7 +742,8 @@ const prefixMemory = 64
 
 // addName records an entry's name and the folders it implies. It refuses a
 // name an extractor could take for one it has seen: the same name, the same
-// one in another case, or a file where a folder is (or the other way round). Folders it implies are looked up deepest first, until one is
+// one in another case or Unicode normalization, or a file where a folder is
+// (or the other way round). Folders it implies are looked up deepest first, until one is
 // known, and each lookup counts as work.
 func (p *processor) addName(name string) error {
 	dir := strings.HasSuffix(name, "/")
@@ -759,7 +762,7 @@ func (p *processor) addName(name string) error {
 	case prev.dir != dir:
 		return unsupported("%s is both a file and a folder", quote(name))
 	case prev.name != "":
-		return unsupported("entries %s and %s differ only in case", quote(prev.name), quote(name))
+		return unsupported("entries %s and %s are the same file on macOS and Windows", quote(prev.name), quote(name))
 	}
 	p.names[key] = pathInfo{name: name, dir: dir}
 
@@ -784,9 +787,13 @@ func (p *processor) addName(name string) error {
 }
 
 // fold maps names that a case-insensitive file system takes for the same
-// path to one key, without the trailing slash of a folder.
+// path to one key, without the trailing slash of a folder. macOS also takes
+// names that differ only in Unicode normalization for one (NFC "café" and
+// the NFD one it writes), so the key is decomposed before and after the case
+// mapping, like Unicode's canonical caseless match. The key can be up to
+// three times as long as the name.
 func fold(name string) string {
-	return strings.ToLower(strings.ToUpper(strings.TrimSuffix(name, "/")))
+	return norm.NFD.String(strings.ToLower(strings.ToUpper(norm.NFD.String(strings.TrimSuffix(name, "/")))))
 }
 
 // holdsEnd reports whether an end record signature starts anywhere in the
