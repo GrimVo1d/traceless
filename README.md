@@ -119,6 +119,7 @@ tag, so rotated photos still display upright.
 |:--|:--|
 | PNG | ✅ supported |
 | JPEG | ✅ baseline, extended and progressive |
+| ZIP | ✅ archives of files traceless cleans, nested archives too |
 | Office documents, PDF, MP4 / HEIC, audio | 🗺️ planned |
 
 ## Limitations
@@ -127,6 +128,10 @@ tag, so rotated photos still display upright.
 - ICC color profiles are replaced: sRGB, Display P3 and Adobe RGB profiles
   by a canonical one with the same colors, others removed, so images in
   other color spaces (e.g. ProPhoto RGB) can look slightly different.
+- ZIP archives are refused if they hold a file traceless can't clean, or
+  use encryption, ZIP64 or names that are unsafe on Windows or macOS.
+  Entry dates, permissions (except the execute bit), comments and macOS
+  and Windows system files are removed.
 - JPEG image data is re-encoded losslessly with the standard Huffman tables:
   the pixels stay identical, but files that used optimized tables grow by
   about 5-10%. Progressive JPEGs come out as baseline ones.

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"traceless/internal/format"
@@ -74,6 +75,42 @@ func TestStripFile(t *testing.T) {
 		t.Errorf("new file mode %v, want 0600", info.Mode().Perm())
 	}
 	assertOnly(t, dir, "clean.png")
+}
+
+// Archive entries are cleaned with core's own handlers, and the depth limit
+// covers archives inside archives.
+func TestStripArchive(t *testing.T) {
+	const archive = "../format/zip/testdata/metadata.zip"
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "clean.zip")
+	h, err := StripFile(context.Background(), format.DefaultLimits, archive, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.Name() != "ZIP" {
+		t.Errorf("handler %s, want ZIP", h.Name())
+	}
+	if _, fields, err := InspectFile(context.Background(), format.DefaultLimits, dst); err != nil || len(fields) != 0 {
+		t.Errorf("InspectFile = %v, %v; want no fields", fields, err)
+	}
+	_, fields, err := InspectFile(context.Background(), format.DefaultLimits, archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nested bool
+	for _, f := range fields {
+		nested = nested || strings.HasPrefix(f.Name, "photo.png: ")
+	}
+	if !nested {
+		t.Errorf("InspectFile reports nothing from inside photo.png: %v", fields)
+	}
+
+	l := format.DefaultLimits
+	l.Depth = 0 // the archive itself, but not the images in it
+	if _, err := StripFile(context.Background(), l, archive, filepath.Join(dir, "out.zip")); !errors.Is(err, format.ErrLimit) {
+		t.Errorf("StripFile with depth 0 = %v, want ErrLimit", err)
+	}
+	assertOnly(t, dir, "clean.zip")
 }
 
 func TestStripFileNeverOverwrites(t *testing.T) {

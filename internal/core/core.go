@@ -16,12 +16,19 @@ import (
 	"traceless/internal/format"
 	"traceless/internal/format/jpeg"
 	"traceless/internal/format/png"
+	"traceless/internal/format/zip"
 )
 
 // handlers lists every supported format, tried in order during detection.
-var handlers = []format.Handler{
-	png.Handler{},
-	jpeg.Handler{},
+// Archives clean their entries with the same list, so it is set in init.
+var handlers []format.Handler
+
+func init() {
+	handlers = []format.Handler{
+		png.Handler{},
+		jpeg.Handler{},
+		zip.Handler{Formats: func() []format.Handler { return handlers }},
+	}
 }
 
 // ErrHardLinked means an in-place strip was refused because other hard links
