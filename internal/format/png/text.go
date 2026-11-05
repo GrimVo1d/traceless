@@ -26,10 +26,20 @@ const (
 )
 
 // textDecoder decodes the chunks Inspect shows as text, spending from
-// budget. It reuses one zlib reader for all of them.
+// budget. It reuses one zlib reader for all of them, held in the budget
+// until release.
 type textDecoder struct {
 	budget *format.Budget
 	zr     io.ReadCloser
+	held   bool // inflaterMemory is held for zr
+}
+
+func (td *textDecoder) release() {
+	if td.held {
+		td.budget.Release(inflaterMemory)
+		td.held = false
+	}
+	td.zr = nil
 }
 
 // describe turns a dropped chunk into a human-readable field. Generic chunks
@@ -47,7 +57,14 @@ func (td *textDecoder) describe(h chunkHeader, data io.Reader) (f format.Field, 
 	}
 	defer td.budget.Release(n)
 	if h.Type == "zTXt" || h.Type == "iTXt" {
-		// What inflate may decompress, charged before it runs.
+		// The zlib reader and what inflate may decompress, charged before
+		// it runs: inflate's errors only mean the text can't be shown.
+		if !td.held {
+			if err := td.budget.Hold(inflaterMemory); err != nil {
+				return format.Field{}, false, err
+			}
+			td.held = true
+		}
 		if err := td.budget.Inflate(maxValueLen + 1); err != nil {
 			return format.Field{}, false, err
 		}

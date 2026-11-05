@@ -868,6 +868,23 @@ func TestBudget(t *testing.T) {
 		t.Errorf("Inspect of 2000 zTXt chunks = %d fields, %v; want a capped report", len(fields), err)
 	}
 
+	// The zlib reader for compressed text is held until the call ends: a
+	// 4x4 image fits a budget of its codec and 64 KB, but not with it.
+	ihdr, idat := plainChunks()
+	plain := pngOf(ihdr, idat, iendChunk)
+	withText := pngOf(ihdr, encodeChunk("zTXt", join([]byte("k\x00\x00"), deflate([]byte("text")))), idat, iendChunk)
+	small := format.Limits{Memory: codecMemory + 64<<10, Decompressed: 1 << 30, Work: 1 << 30}
+	if _, err := (Handler{}).Inspect(limited(small), bytes.NewReader(plain)); err != nil {
+		t.Errorf("Inspect without text = %v", err)
+	}
+	if _, err := (Handler{}).Inspect(limited(small), bytes.NewReader(withText)); !errors.Is(err, format.ErrLimit) {
+		t.Errorf("Inspect with zTXt = %v, want ErrLimit", err)
+	}
+	tb := limited(format.Limits{Memory: 4 << 20, Decompressed: 1 << 30, Work: 1 << 30})
+	if _, err := (Handler{}).Inspect(tb, bytes.NewReader(withText)); err != nil || tb.Held() != 0 {
+		t.Errorf("Inspect with zTXt = %v, %d bytes still held", err, tb.Held())
+	}
+
 	// One budget that fits one call at a time fits many calls in a row.
 	b := limited(format.Limits{Memory: 2 << 20, Decompressed: 1 << 30, Work: 1 << 30})
 	for i := range 3 {

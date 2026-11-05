@@ -152,6 +152,11 @@ type pendingChunk struct {
 }
 
 func (p *processor) run(r io.Reader) error {
+	defer func() {
+		if p.text != nil {
+			p.text.release()
+		}
+	}()
 	cr, err := newChunkReader(r)
 	if err != nil {
 		return err
