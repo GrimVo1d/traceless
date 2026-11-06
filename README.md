@@ -138,8 +138,7 @@ tag, so rotated photos still display upright.
 - JPEG edge blocks that are partly outside the image keep their invisible
   part, since changing it would mean re-compressing the visible pixels.
 - Values viewers need (PNG gamma and primaries, JPEG quantization tables
-  and density) are range-checked but kept as they are, and so are unused
-  PNG palette entries.
+  and density) are range-checked but kept as they are.
 - Data hidden in the pixel values themselves (steganography) is out of scope.
 - `-inplace` writes a new file. The old data may stay on disk until the space
   is reused.
